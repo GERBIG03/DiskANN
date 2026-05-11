@@ -260,12 +260,18 @@ is running. This incremental saving allows benchmarks to be interrupted without 
 In addition to the machine-readable JSON output files, a (hopefully) helpful summary of the
 results will be printed to `stdout`.
 
+You could run this on [larger datasets](https://github.com/harsha-simhadri/big-ann-benchmarks/blob/main/benchmark/datasets.py). To exercise this code on a million-scale dataset you could set up [`big-ann-benchmarks`](https://github.com/harsha-simhadri/big-ann-benchmarks) and download Wikipedia articles encoded with Cohere embeddings via `python create_dataset.py --dataset wikipedia-1M`, set the download directory, and run index build and search with quantization options:
+```
+cargo run --release --package diskann-benchmark --features product-quantization -- run --input-file .\diskann-benchmark\example\graph-index-product-quantization-wiki1M.json --output-file wiki1M-product-output.json
+cargo run --release --package diskann-benchmark --features spherical-quantization -- run --input-file .\diskann-benchmark\example\graph-index-spherical-quantization-wiki1M.json --output-file wiki1M-spherical-output.json
+
+``` 
+
 ### Streaming Runs
 Running the benchmark on a streaming workload is similar to other registered benchmarks,
-relying on the file formats and streaming runbooks of `big-ann-benchmarks`
+relying on the file formats and streaming runbooks of [`big-ann-benchmarks`](https://github.com/harsha-simhadri/big-ann-benchmarks).
 
-First, set up the runbook and ground truth for the desired workload. Refer to the `README` in
-`big-ann-benchmarks/neurips23` and the runbooks in `big-ann-benchmarks/neurips23/streaming`.
+First, set up the runbook and ground truth for the desired workload. Refer to the [`big-ann-benchmarks/neurips23/README`](https://github.com/harsha-simhadri/big-ann-benchmarks/blob/main/neurips23/README.md) and the runbooks in [`big-ann-benchmarks/neurips23/streaming`](https://github.com/harsha-simhadri/big-ann-benchmarks/tree/main/neurips23/streaming).
 
 Benchmarks are run with
 ```sh
