@@ -105,7 +105,7 @@ impl QuantVectorProvider {
             .quantizer
             .fused_query_computer(
                 &query_f32,
-                QueryLayout::FullPrecision,
+                QueryLayout::SameAsData,
                 true,
                 GlobalAllocator,
                 ScopedAllocator::global(),
@@ -242,6 +242,11 @@ impl QuantVectorProvider {
         self.quant_vector_index.insert(key, v);
 
         Ok(())
+    }
+
+    pub(crate) fn delete_vector(&self, i: usize) {
+        let key = bytes_of::<usize>(&i);
+        self.quant_vector_index.delete(key);
     }
 }
 

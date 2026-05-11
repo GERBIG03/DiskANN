@@ -47,15 +47,12 @@ use super::{
     quant_vector_provider::QuantVectorProvider,
     vector_provider::VectorProvider,
 };
-use diskann::graph::glue::{AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy};
+use diskann::graph::glue::{AsDeletionCheck, RemoveDeletedIdsAndCopy};
 use diskann_providers::model::graph::provider::async_::{
-    common::{CreateDeleteProvider, FullPrecision, Hybrid, NoDeletes, NoStore, Panics},
-    distances, TableDeleteProviderAsync,
+    common::{FullPrecision, Hybrid, NoDeletes, NoStore, Panics},
+    distances,
 };
-
-use diskann_providers::storage::{LoadWith, SaveWith};
-
-use diskann_providers::storage::{StorageReadProvider, StorageWriteProvider};
+use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, StorageWriteProvider};
 
 /////////////////////
 // BfTreeProvider //
@@ -121,7 +118,7 @@ use diskann_providers::storage::{StorageReadProvider, StorageWriteProvider};
 /// use diskann_bf_tree_provider::provider::{
 ///     BfTreeProvider, BfTreeProviderParameters
 /// };
-/// use diskann_providers::model::graph::provider::async_::common::{NoStore, NoDeletes};
+/// use diskann_providers::model::graph::provider::async_::common::NoStore;
 /// use diskann_vector::distance::Metric;
 /// use bf_tree::Config;
 /// use std::num::NonZeroUsize;
@@ -143,11 +140,10 @@ use diskann_providers::storage::{StorageReadProvider, StorageWriteProvider};
 /// let provider = BfTreeProvider::<f32, _>::new_empty(
 ///     parameters,
 ///     NoStore,
-///     NoDeletes,
 /// );
 /// ```
 ///
-/// ## Full-Precision and Spherical Quantization - No Deletes
+/// ## Full-Precision and Spherical Quantization
 ///
 /// To create a two-level provider with a spherical quantization-based quant vector store,
 /// a `Poly<dyn Quantizer>` can be supplied for the `quant_precursor` argument, as this
@@ -162,7 +158,6 @@ use diskann_providers::storage::{StorageReadProvider, StorageWriteProvider};
 /// use diskann_bf_tree_provider::provider::{
 ///     BfTreeProvider, BfTreeProviderParameters
 /// };
-/// use diskann_providers::model::graph::provider::async_::common::NoDeletes;
 /// use diskann_vector::distance::Metric;
 /// use bf_tree::Config;
 /// use std::num::NonZeroUsize;
@@ -195,67 +190,12 @@ use diskann_providers::storage::{StorageReadProvider, StorageWriteProvider};
 /// };
 ///
 /// // Create a table that supports 5 points and 1 start point.
-/// let provider = BfTreeProvider::<f32>::new_empty(
+/// let provider = BfTreeProvider::<f32, _>::new_empty(
 ///     parameters,
 ///     quantizer,
-///     NoDeletes,
 /// );
 /// ```
-///
-/// ## Full-Precision and Spherical Quantization - With Deletes.
-///
-/// If deletes are desired, then the type [`TableBasedDeletes`] can be passed to the
-/// constructor.
-/// ```
-/// use diskann_quantization::{
-///     alloc::{GlobalAllocator, Poly, poly},
-///     algorithms::TransformKind,
-///     spherical::{iface, SphericalQuantizer, SupportedMetric, PreScale},
-/// };
-/// use diskann_utils::views::{Init, Matrix};
-/// use diskann_bf_tree_provider::provider::{
-///     BfTreeProvider, BfTreeProviderParameters
-/// };
-/// use diskann_providers::model::graph::provider::async_::common::TableBasedDeletes;
-/// use diskann_vector::distance::Metric;
-/// use bf_tree::Config;
-/// use std::num::NonZeroUsize;
-/// use rand::rngs::StdRng;
-/// use rand::SeedableRng;
-///
-/// let dim = 4;
-/// let data = Matrix::new(Init(|| 1.0f32), 4, dim);
-/// let mut rng = StdRng::seed_from_u64(42);
-/// let sq = SphericalQuantizer::train(
-///     data.as_view(), TransformKind::Null,
-///     SupportedMetric::SquaredL2, PreScale::None,
-///     &mut rng, GlobalAllocator,
-/// ).unwrap();
-/// let imp = iface::Impl::<1>::new(sq).unwrap();
-/// let poly = Poly::new(imp, GlobalAllocator).unwrap();
-/// let quantizer: Poly<dyn iface::Quantizer> = poly!(iface::Quantizer, poly);
-///
-/// let parameters = BfTreeProviderParameters {
-///     max_points: 5,
-///     num_start_points: NonZeroUsize::new(1).unwrap(),
-///     dim: 4,
-///     metric: Metric::L2,
-///     max_fp_vecs_per_fill: None,
-///     max_degree: 32,
-///     vector_provider_config: Config::default(),
-///     quant_vector_provider_config: Config::default(),
-///     neighbor_list_provider_config: Config::default(),
-///     graph_params: None,
-/// };
-///
-/// // Create a table that supports 5 points and 1 start point.
-/// let provider = BfTreeProvider::<f32, _, _>::new_empty(
-///     parameters,
-///     quantizer,
-///     TableBasedDeletes,
-/// );
-/// ```
-pub struct BfTreeProvider<T, Q = QuantVectorProvider, D = NoDeletes>
+pub struct BfTreeProvider<T, Q = QuantVectorProvider>
 where
     T: VectorRepr,
 {
@@ -270,10 +210,6 @@ where
     // Provider that holds the graph structure as neighbors of vectors.
     //
     pub(crate) neighbor_provider: NeighborProvider<u32>,
-
-    // The delete provider. If `D == NoDeletes`, then delete related operations are disabled.
-    //
-    pub(super) deleted: D,
 
     // A parameter controlling hybrid pruning, where some set of full-precision vectors are
     // fetched and the rest are quantized vectors
@@ -323,10 +259,10 @@ pub struct BfTreeProviderParameters {
     pub graph_params: Option<GraphParams>,
 }
 
-pub type Index<T, D = NoDeletes> = Arc<DiskANNIndex<BfTreeProvider<T, NoStore, D>>>;
-pub type QuantIndex<T, Q, D = NoDeletes> = Arc<DiskANNIndex<BfTreeProvider<T, Q, D>>>;
+pub type Index<T> = Arc<DiskANNIndex<BfTreeProvider<T, NoStore>>>;
+pub type QuantIndex<T, Q> = Arc<DiskANNIndex<BfTreeProvider<T, Q>>>;
 
-impl<T, Q, D> BfTreeProvider<T, Q, D>
+impl<T, Q> BfTreeProvider<T, Q>
 where
     T: VectorRepr,
 {
@@ -339,14 +275,9 @@ where
     /// * `delete_precursor`: A precursor type for the delete layer.
     /// * `neighbor_precursor`: A precursor type for the neighbor layer.
     ///   or the neighbor layer
-    pub fn new_empty<TQ, TD>(
-        params: BfTreeProviderParameters,
-        quant_precursor: TQ,
-        delete_precursor: TD,
-    ) -> ANNResult<Self>
+    pub fn new_empty<TQ>(params: BfTreeProviderParameters, quant_precursor: TQ) -> ANNResult<Self>
     where
         TQ: CreateQuantProvider<Target = Q>,
-        TD: CreateDeleteProvider<Target = D>,
     {
         let num_start_points = params.num_start_points.get();
 
@@ -367,7 +298,6 @@ where
                 params.max_degree,
                 params.neighbor_list_provider_config,
             )?,
-            deleted: delete_precursor.create(params.max_points + num_start_points),
             max_fp_vecs_per_fill: params.max_fp_vecs_per_fill.unwrap_or(usize::MAX),
             metric: params.metric,
             graph_params: params.graph_params,
@@ -389,16 +319,14 @@ where
     ///
     /// # Type Constraints
     /// * `Self: StartPoint<T>` - The provider must implement the `StartPoint` trait.
-    pub fn new<TQ, TD>(
+    pub fn new<TQ>(
         params: BfTreeProviderParameters,
         start_points: MatrixView<'_, T>,
         quant_precursor: TQ,
-        delete_precursor: TD,
     ) -> ANNResult<Self>
     where
         Self: StartPoint<T>,
         TQ: CreateQuantProvider<Target = Q>,
-        TD: CreateDeleteProvider<Target = D>,
     {
         // Early validation before allocating resources
         if start_points.nrows() != params.num_start_points.get() {
@@ -409,7 +337,7 @@ where
             )));
         }
 
-        let provider = Self::new_empty(params.clone(), quant_precursor, delete_precursor)?;
+        let provider = Self::new_empty(params.clone(), quant_precursor)?;
         provider.set_start_points(Hidden(()), start_points)?;
         {
             // Initialize all neighborhoods to be empty lists.
@@ -470,18 +398,7 @@ where
     }
 }
 
-impl<T, Q> BfTreeProvider<T, Q, TableDeleteProviderAsync>
-where
-    T: VectorRepr,
-{
-    /// A temporary method while development of deletion is in progress
-    ///
-    pub fn clear_delete_set(&self) {
-        self.deleted.clear();
-    }
-}
-
-impl<T, D> BfTreeProvider<T, QuantVectorProvider, D>
+impl<T> BfTreeProvider<T, QuantVectorProvider>
 where
     T: VectorRepr,
 {
@@ -495,7 +412,7 @@ where
     }
 }
 
-impl<T, D> BfTreeProvider<T, NoStore, D>
+impl<T> BfTreeProvider<T, NoStore>
 where
     T: VectorRepr,
 {
@@ -506,9 +423,65 @@ where
     }
 }
 
+impl<T, Q> Delete for BfTreeProvider<T, Q>
+where
+    T: VectorRepr,
+    Q: AsyncFriendly + QuantDelete,
+{
+    fn release(
+        &self,
+        _context: &Self::Context,
+        _id: Self::InternalId,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        // no-op: hard delete removes the data
+        std::future::ready(Ok(()))
+    }
+
+    fn delete(
+        &self,
+        _context: &Self::Context,
+        gid: &Self::ExternalId,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        let id = *gid;
+
+        if let Err(e) = self.neighbor_provider.delete_vector(id) {
+            return std::future::ready(Err(e));
+        }
+        if let Err(e) = self.neighbor_provider.set_neighbors(id, &[]) {
+            return std::future::ready(Err(e));
+        }
+        self.full_vectors.delete_vector(id as usize);
+        self.quant_vectors.delete_vector(id as usize);
+
+        std::future::ready(Ok(()))
+    }
+
+    fn status_by_external_id(
+        &self,
+        context: &Self::Context,
+        gid: &Self::ExternalId,
+    ) -> impl std::future::Future<Output = Result<diskann::provider::ElementStatus, Self::Error>> + Send
+    {
+        self.status_by_internal_id(context, *gid)
+    }
+
+    fn status_by_internal_id(
+        &self,
+        _context: &Self::Context,
+        id: Self::InternalId,
+    ) -> impl std::future::Future<Output = Result<diskann::provider::ElementStatus, Self::Error>> + Send
+    {
+        let status = match self.full_vectors.get_vector_sync(id.into_usize()) {
+            Ok(_) => ElementStatus::Valid,
+            Err(_) => ElementStatus::Deleted,
+        };
+        std::future::ready(Ok(status))
+    }
+}
+
 /// Allow `&BfTreeProvider` to implement `IntoIter`
 ///
-impl<T, Q, D> IntoIterator for &BfTreeProvider<T, Q, D>
+impl<T, Q> IntoIterator for &BfTreeProvider<T, Q>
 where
     T: VectorRepr,
 {
@@ -575,11 +548,26 @@ impl CreateQuantProvider for Poly<dyn Quantizer> {
     }
 }
 
-impl<T, Q, D> BfTreeProvider<T, Q, D>
+pub(crate) trait QuantDelete {
+    fn delete_vector(&self, id: usize);
+}
+
+impl QuantDelete for NoStore {
+    fn delete_vector(&self, _id: usize) {
+        //no-op
+    }
+}
+
+impl QuantDelete for QuantVectorProvider {
+    fn delete_vector(&self, id: usize) {
+        self.delete_vector(id);
+    }
+}
+
+impl<T, Q> BfTreeProvider<T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     pub fn neighbors(&self) -> &NeighborProvider<u32> {
         &self.neighbor_provider
@@ -590,11 +578,10 @@ where
 // Data Provider //
 ///////////////////
 
-impl<T, Q, D> DataProvider for BfTreeProvider<T, Q, D>
+impl<T, Q> DataProvider for BfTreeProvider<T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type Context = DefaultContext;
 
@@ -634,92 +621,23 @@ where
     }
 }
 
-impl<T, Q, D> HasId for BfTreeProvider<T, Q, D>
+impl<T, Q> HasId for BfTreeProvider<T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type Id = u32;
 }
 
-impl<'a, T, Q, D> DelegateNeighbor<'a> for BfTreeProvider<T, Q, D>
+impl<'a, T, Q> DelegateNeighbor<'a> for BfTreeProvider<T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type Delegate = &'a NeighborProvider<u32>;
 
     fn delegate_neighbor(&'a mut self) -> Self::Delegate {
         self.neighbors()
-    }
-}
-
-/// Support deletes when we have a valid delete provider.
-///
-impl<T, Q> Delete for BfTreeProvider<T, Q, TableDeleteProviderAsync>
-where
-    Q: AsyncFriendly,
-    T: VectorRepr,
-{
-    fn release(
-        &self,
-        _: &DefaultContext,
-        id: Self::InternalId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        // delete the vector from bf-tree
-        if let Err(e) = self.neighbor_provider.delete_vector(id) {
-            return std::future::ready(Err(e));
-        }
-        self.deleted.undelete(id.into_usize());
-        // set its neighbors to an empty list in the neighbor provider
-        // self.neighbor_provider.set_neighbors(id, &[]);
-        let res = self
-            .neighbor_provider
-            .set_neighbors(id, &[])
-            .map_err(|err| err.context(format!("resetting neighbors for undeleted id {}", id)));
-        std::future::ready(res)
-    }
-
-    /// Delete an item by external ID
-    ///
-    #[inline]
-    fn delete(
-        &self,
-        _context: &DefaultContext,
-        gid: &Self::ExternalId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        self.deleted.delete(gid.into_usize());
-        std::future::ready(Ok(()))
-    }
-
-    /// Check the status via external ID
-    ///
-    #[inline]
-    fn status_by_external_id(
-        &self,
-        context: &DefaultContext,
-        gid: &Self::ExternalId,
-    ) -> impl Future<Output = Result<ElementStatus, Self::Error>> + Send {
-        // NOTE: ID translation is the identity, so we can refer to `status_by_internal_id`.
-        self.status_by_internal_id(context, *gid)
-    }
-
-    /// Check the status via internal ID
-    ///
-    #[inline]
-    fn status_by_internal_id(
-        &self,
-        _context: &DefaultContext,
-        id: Self::InternalId,
-    ) -> impl Future<Output = Result<ElementStatus, Self::Error>> + Send {
-        let status = if self.deleted.is_deleted(id.into_usize()) {
-            ElementStatus::Deleted
-        } else {
-            ElementStatus::Valid
-        };
-        std::future::ready(Ok(status))
     }
 }
 
@@ -760,10 +678,9 @@ impl NeighborAccessorMut for &NeighborProvider<u32> {
 
 /// Assign to both the full-precision and quant vector stores
 ///
-impl<T, D> SetElement<&[T]> for BfTreeProvider<T, QuantVectorProvider, D>
+impl<T> SetElement<&[T]> for BfTreeProvider<T, QuantVectorProvider>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type SetError = ANNError;
 
@@ -797,10 +714,9 @@ where
 
 /// Assign to just the full-precision store
 ///
-impl<T, D> SetElement<&[T]> for BfTreeProvider<T, NoStore, D>
+impl<T> SetElement<&[T]> for BfTreeProvider<T, NoStore>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type SetError = ANNError;
 
@@ -856,10 +772,9 @@ pub trait StartPoint<T> {
 ///
 /// This implementation sets both the full-precision and quantized vectors for each
 /// start point, as well as initializing empty neighbor lists.
-impl<T, D> StartPoint<T> for BfTreeProvider<T, QuantVectorProvider, D>
+impl<T> StartPoint<T> for BfTreeProvider<T, QuantVectorProvider>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     fn set_start_points(&self, _hidden: Hidden, start_points: MatrixView<'_, T>) -> ANNResult<()> {
         let start_point_ids = self.full_vectors.starting_points()?;
@@ -888,10 +803,9 @@ where
 ///
 /// This implementation sets the full-precision vectors for each start point
 /// and initializes empty neighbor lists.
-impl<T, D> StartPoint<T> for BfTreeProvider<T, NoStore, D>
+impl<T> StartPoint<T> for BfTreeProvider<T, NoStore>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     fn set_start_points(&self, _hidden: Hidden, start_points: MatrixView<'_, T>) -> ANNResult<()> {
         let start_point_ids = self.full_vectors.starting_points()?;
@@ -926,45 +840,41 @@ where
 /// * [`ComputerAccessor`] for comparing full-precision distances.
 /// * [`BuildQueryComputer`].
 ///
-pub struct FullAccessor<'a, T, Q, D>
+pub struct FullAccessor<'a, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     /// The host provider.
-    provider: &'a BfTreeProvider<T, Q, D>,
+    provider: &'a BfTreeProvider<T, Q>,
     /// A buffer to store retrieved elements.
     element: Box<[T]>,
 }
 
-impl<T, Q, D> HasId for FullAccessor<'_, T, Q, D>
+impl<T, Q> HasId for FullAccessor<'_, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type Id = u32;
 }
 
-impl<T, Q, D> SearchExt for FullAccessor<'_, T, Q, D>
+impl<T, Q> SearchExt for FullAccessor<'_, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     fn starting_points(&self) -> impl Future<Output = ANNResult<Vec<u32>>> {
         std::future::ready(self.provider.starting_points())
     }
 }
 
-impl<'a, T, Q, D> FullAccessor<'a, T, Q, D>
+impl<'a, T, Q> FullAccessor<'a, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
-    pub(crate) fn new(provider: &'a BfTreeProvider<T, Q, D>) -> Self {
+    pub(crate) fn new(provider: &'a BfTreeProvider<T, Q>) -> Self {
         Self {
             provider,
             element: (0..provider.full_vectors.dim())
@@ -974,11 +884,10 @@ where
     }
 }
 
-impl<'a, T, Q, D> DelegateNeighbor<'a> for FullAccessor<'_, T, Q, D>
+impl<'a, T, Q> DelegateNeighbor<'a> for FullAccessor<'_, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type Delegate = &'a NeighborProvider<u32>;
 
@@ -987,11 +896,10 @@ where
     }
 }
 
-impl<T, Q, D> Accessor for FullAccessor<'_, T, Q, D>
+impl<T, Q> Accessor for FullAccessor<'_, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     /// This accessor returns a reference to a local copy of the vector.
     type Element<'a>
@@ -1028,11 +936,10 @@ where
     }
 }
 
-impl<T, Q, D> BuildDistanceComputer for FullAccessor<'_, T, Q, D>
+impl<T, Q> BuildDistanceComputer for FullAccessor<'_, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type DistanceComputerError = Panics;
     type DistanceComputer = T::Distance;
@@ -1047,11 +954,10 @@ where
     }
 }
 
-impl<T, Q, D> BuildQueryComputer<&[T]> for FullAccessor<'_, T, Q, D>
+impl<T, Q> BuildQueryComputer<&[T]> for FullAccessor<'_, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type QueryComputerError = Panics;
     type QueryComputer = T::QueryDistance;
@@ -1063,24 +969,11 @@ where
         Ok(T::query_distance(from, self.provider.metric))
     }
 }
-impl<T, Q, D> ExpandBeam<&[T]> for FullAccessor<'_, T, Q, D>
+impl<T, Q> ExpandBeam<&[T]> for FullAccessor<'_, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
-}
-
-impl<'a, T, Q, D> AsDeletionCheck for FullAccessor<'a, T, Q, D>
-where
-    T: VectorRepr,
-    Q: AsyncFriendly,
-    D: AsyncFriendly + DeletionCheck,
-{
-    type Checker = D;
-    fn as_deletion_check(&self) -> &D {
-        &self.provider.deleted
-    }
 }
 
 ///////////////////
@@ -1094,39 +987,35 @@ where
 /// * [`Accessor`] for the `BfTreeProvider`.
 /// * [`BuildQueryComputer`].
 ///
-pub struct QuantAccessor<'a, T, D>
+pub struct QuantAccessor<'a, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
-    provider: &'a BfTreeProvider<T, QuantVectorProvider, D>,
+    provider: &'a BfTreeProvider<T, QuantVectorProvider>,
     element: Box<[u8]>,
 }
 
-impl<T, D> HasId for QuantAccessor<'_, T, D>
+impl<T> HasId for QuantAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type Id = u32;
 }
 
-impl<T, D> SearchExt for QuantAccessor<'_, T, D>
+impl<T> SearchExt for QuantAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     fn starting_points(&self) -> impl Future<Output = ANNResult<Vec<u32>>> {
         std::future::ready(self.provider.starting_points())
     }
 }
 
-impl<'a, T, D> QuantAccessor<'a, T, D>
+impl<'a, T> QuantAccessor<'a, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
-    pub(crate) fn new(provider: &'a BfTreeProvider<T, QuantVectorProvider, D>) -> Self {
+    pub(crate) fn new(provider: &'a BfTreeProvider<T, QuantVectorProvider>) -> Self {
         Self {
             provider,
             element: (0..provider.quant_vectors.quantizer.bytes())
@@ -1136,10 +1025,9 @@ where
     }
 }
 
-impl<'a, T, D> DelegateNeighbor<'a> for QuantAccessor<'_, T, D>
+impl<'a, T> DelegateNeighbor<'a> for QuantAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type Delegate = &'a NeighborProvider<u32>;
     fn delegate_neighbor(&'a mut self) -> Self::Delegate {
@@ -1147,10 +1035,9 @@ where
     }
 }
 
-impl<T, D> Accessor for QuantAccessor<'_, T, D>
+impl<T> Accessor for QuantAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     /// This accessor returns a reference to a local copy of the element.
     type Element<'a>
@@ -1210,10 +1097,9 @@ where
     }
 }
 
-impl<T, D> BuildQueryComputer<&[T]> for QuantAccessor<'_, T, D>
+impl<T> BuildQueryComputer<&[T]> for QuantAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type QueryComputerError = ANNError;
     type QueryComputer = QuantQueryComputer;
@@ -1226,23 +1112,7 @@ where
     }
 }
 
-impl<T, D> ExpandBeam<&[T]> for QuantAccessor<'_, T, D>
-where
-    T: VectorRepr,
-    D: AsyncFriendly,
-{
-}
-
-impl<'a, T, D> AsDeletionCheck for QuantAccessor<'a, T, D>
-where
-    T: VectorRepr,
-    D: AsyncFriendly + DeletionCheck,
-{
-    type Checker = D;
-    fn as_deletion_check(&self) -> &D {
-        &self.provider.deleted
-    }
-}
+impl<T> ExpandBeam<&[T]> for QuantAccessor<'_, T> where T: VectorRepr {}
 
 /////////////////////
 // Hybrid Accessor //
@@ -1258,36 +1128,32 @@ where
 ///   element types.
 /// * [`Fill`] for populating a mixture of full-precision and quant vectors.
 ///
-pub struct HybridAccessor<'a, T, D>
+pub struct HybridAccessor<'a, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
-    provider: &'a BfTreeProvider<T, QuantVectorProvider, D>,
+    provider: &'a BfTreeProvider<T, QuantVectorProvider>,
 }
 
-impl<'a, T, D> HybridAccessor<'a, T, D>
+impl<'a, T> HybridAccessor<'a, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
-    fn new(provider: &'a BfTreeProvider<T, QuantVectorProvider, D>) -> Self {
+    fn new(provider: &'a BfTreeProvider<T, QuantVectorProvider>) -> Self {
         Self { provider }
     }
 }
 
-impl<T, D> HasId for HybridAccessor<'_, T, D>
+impl<T> HasId for HybridAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type Id = u32;
 }
 
-impl<'a, T, D> DelegateNeighbor<'a> for HybridAccessor<'_, T, D>
+impl<'a, T> DelegateNeighbor<'a> for HybridAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type Delegate = &'a NeighborProvider<u32>;
     fn delegate_neighbor(&'a mut self) -> Self::Delegate {
@@ -1295,10 +1161,9 @@ where
     }
 }
 
-impl<T, D> Accessor for HybridAccessor<'_, T, D>
+impl<T> Accessor for HybridAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     /// The [`distances::pq::Hybrid`] is an enum consisting of either a full-precision
     /// vector or a quantized vector.
@@ -1334,10 +1199,9 @@ where
     }
 }
 
-impl<T, D> BuildDistanceComputer for HybridAccessor<'_, T, D>
+impl<T> BuildDistanceComputer for HybridAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type DistanceComputerError = ANNError;
     type DistanceComputer = HybridComputer<T>;
@@ -1354,10 +1218,9 @@ where
     }
 }
 
-impl<T, D> workingset::Fill<distances::pq::HybridMap<T, u8>> for HybridAccessor<'_, T, D>
+impl<T> workingset::Fill<distances::pq::HybridMap<T, u8>> for HybridAccessor<'_, T>
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type Error = ANNError;
     type View<'a>
@@ -1423,30 +1286,28 @@ where
 /// Perform a search entirely in the full-precision space.
 ///
 /// Starting points are not filtered out of the final results.
-impl<T, Q, D> SearchStrategy<BfTreeProvider<T, Q, D>, &[T]> for FullPrecision
+impl<T, Q> SearchStrategy<BfTreeProvider<T, Q>, &[T]> for FullPrecision
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly + DeletionCheck,
 {
     type QueryComputer = T::QueryDistance;
-    type SearchAccessor<'a> = FullAccessor<'a, T, Q, D>;
+    type SearchAccessor<'a> = FullAccessor<'a, T, Q>;
     type SearchAccessorError = Panics;
 
     fn search_accessor<'a>(
         &'a self,
-        provider: &'a BfTreeProvider<T, Q, D>,
+        provider: &'a BfTreeProvider<T, Q>,
         _context: &'a DefaultContext,
     ) -> Result<Self::SearchAccessor<'a>, Self::SearchAccessorError> {
         Ok(FullAccessor::new(provider))
     }
 }
 
-impl<T, Q, D> DefaultPostProcessor<BfTreeProvider<T, Q, D>, &[T]> for FullPrecision
+impl<T, Q> DefaultPostProcessor<BfTreeProvider<T, Q>, &[T]> for FullPrecision
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly + DeletionCheck,
 {
     default_post_processor!(glue::Pipeline<glue::FilterStartPoints, RemoveDeletedIdsAndCopy>);
 }
@@ -1455,16 +1316,15 @@ where
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Rerank;
 
-impl<'a, T, D> glue::SearchPostProcess<QuantAccessor<'a, T, D>, &[T]> for Rerank
+impl<'a, T> glue::SearchPostProcess<QuantAccessor<'a, T>, &[T]> for Rerank
 where
     T: VectorRepr,
-    D: AsyncFriendly + DeletionCheck,
 {
     type Error = Panics;
 
     fn post_process<I, B>(
         &self,
-        accessor: &mut QuantAccessor<'a, T, D>,
+        accessor: &mut QuantAccessor<'a, T>,
         query: &[T],
         _computer: &QuantQueryComputer,
         candidates: I,
@@ -1475,22 +1335,16 @@ where
         B: SearchOutputBuffer<u32> + ?Sized,
     {
         let provider = &accessor.provider;
-        let checker = accessor.as_deletion_check();
         let f = T::distance(provider.metric, Some(provider.full_vectors.dim()));
 
         // Filter before computing the full precision distances.
         let mut reranked: Vec<(u32, f32)> = candidates
-            .filter_map(|n| {
-                if checker.deletion_check(n.id) {
-                    None
-                } else {
-                    #[allow(clippy::expect_used)]
-                    let vec = provider
-                        .full_vectors
-                        .get_vector_sync(n.id.into_usize())
-                        .expect("Full vector provider failed to retrieve element");
-                    Some((n.id, f.evaluate_similarity(query, &vec)))
-                }
+            .map(|n| {
+                let vec = provider
+                    .full_vectors
+                    .get_vector_sync(n.id.into_usize())
+                    .expect("Full vector provider failed to retrieve element");
+                (n.id, f.evaluate_similarity(query, &vec))
             })
             .collect();
 
@@ -1503,18 +1357,17 @@ where
 }
 
 /// Perform a search entirely in the quantized space.
-impl<T, D> SearchStrategy<BfTreeProvider<T, QuantVectorProvider, D>, &[T]> for Hybrid
+impl<T> SearchStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
 where
     T: VectorRepr,
-    D: AsyncFriendly + DeletionCheck,
 {
     type QueryComputer = QuantQueryComputer;
-    type SearchAccessor<'a> = QuantAccessor<'a, T, D>;
+    type SearchAccessor<'a> = QuantAccessor<'a, T>;
     type SearchAccessorError = Panics;
 
     fn search_accessor<'a>(
         &'a self,
-        provider: &'a BfTreeProvider<T, QuantVectorProvider, D>,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
         _context: &'a DefaultContext,
     ) -> Result<Self::SearchAccessor<'a>, Self::SearchAccessorError> {
         Ok(QuantAccessor::new(provider))
@@ -1523,29 +1376,27 @@ where
 
 /// Starting points are filtered out of the final results and results are reranked using
 /// the full-precision data.
-impl<T, D> DefaultPostProcessor<BfTreeProvider<T, QuantVectorProvider, D>, &[T]> for Hybrid
+impl<T> DefaultPostProcessor<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
 where
     T: VectorRepr,
-    D: AsyncFriendly + DeletionCheck,
 {
     default_post_processor!(glue::Pipeline<glue::FilterStartPoints, Rerank>);
 }
 
 // Pruning
-impl<T, Q, D> PruneStrategy<BfTreeProvider<T, Q, D>> for FullPrecision
+impl<T, Q> PruneStrategy<BfTreeProvider<T, Q>> for FullPrecision
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly,
 {
     type WorkingSet = map::Map<u32, Box<[T]>, map::Ref<[T]>>;
     type DistanceComputer<'a> = T::Distance;
-    type PruneAccessor<'a> = FullAccessor<'a, T, Q, D>;
+    type PruneAccessor<'a> = FullAccessor<'a, T, Q>;
     type PruneAccessorError = diskann::error::Infallible;
 
     fn prune_accessor<'a>(
         &'a self,
-        provider: &'a BfTreeProvider<T, Q, D>,
+        provider: &'a BfTreeProvider<T, Q>,
         _context: &'a DefaultContext,
     ) -> Result<Self::PruneAccessor<'a>, Self::PruneAccessorError> {
         Ok(FullAccessor::new(provider))
@@ -1556,19 +1407,18 @@ where
     }
 }
 
-impl<T, D> PruneStrategy<BfTreeProvider<T, QuantVectorProvider, D>> for Hybrid
+impl<T> PruneStrategy<BfTreeProvider<T, QuantVectorProvider>> for Hybrid
 where
     T: VectorRepr,
-    D: AsyncFriendly,
 {
     type WorkingSet = distances::pq::HybridMap<T, u8>;
     type DistanceComputer<'a> = HybridComputer<T>;
-    type PruneAccessor<'a> = HybridAccessor<'a, T, D>;
+    type PruneAccessor<'a> = HybridAccessor<'a, T>;
     type PruneAccessorError = diskann::error::Infallible;
 
     fn prune_accessor<'a>(
         &'a self,
-        provider: &'a BfTreeProvider<T, QuantVectorProvider, D>,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
         _context: &'a DefaultContext,
     ) -> Result<Self::PruneAccessor<'a>, Self::PruneAccessorError> {
         Ok(HybridAccessor::new(provider))
@@ -1579,11 +1429,10 @@ where
     }
 }
 
-impl<T, Q, D> InsertStrategy<BfTreeProvider<T, Q, D>, &[T]> for FullPrecision
+impl<T, Q> InsertStrategy<BfTreeProvider<T, Q>, &[T]> for FullPrecision
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly + DeletionCheck,
 {
     type PruneStrategy = Self;
     fn prune_strategy(&self) -> Self::PruneStrategy {
@@ -1591,10 +1440,9 @@ where
     }
 }
 
-impl<T, D> InsertStrategy<BfTreeProvider<T, QuantVectorProvider, D>, &[T]> for Hybrid
+impl<T> InsertStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
 where
     T: VectorRepr,
-    D: AsyncFriendly + DeletionCheck,
 {
     type PruneStrategy = Self;
     fn prune_strategy(&self) -> Self::PruneStrategy {
@@ -1602,11 +1450,10 @@ where
     }
 }
 
-impl<T, Q, D, B> MultiInsertStrategy<BfTreeProvider<T, Q, D>, B> for FullPrecision
+impl<T, Q, B> MultiInsertStrategy<BfTreeProvider<T, Q>, B> for FullPrecision
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly + DeletionCheck,
     B: for<'a> Batch<Element<'a> = &'a [T]> + Debug,
 {
     type Seed = map::Builder<u32, map::Ref<[T]>>;
@@ -1620,7 +1467,7 @@ where
 
     fn finish<Itr>(
         &self,
-        _provider: &BfTreeProvider<T, Q, D>,
+        _provider: &BfTreeProvider<T, Q>,
         _ctx: &DefaultContext,
         batch: &std::sync::Arc<B>,
         ids: Itr,
@@ -1634,10 +1481,9 @@ where
     }
 }
 
-impl<T, D, B> MultiInsertStrategy<BfTreeProvider<T, QuantVectorProvider, D>, B> for Hybrid
+impl<T, B> MultiInsertStrategy<BfTreeProvider<T, QuantVectorProvider>, B> for Hybrid
 where
     T: VectorRepr,
-    D: AsyncFriendly + DeletionCheck,
     B: for<'a> Batch<Element<'a> = &'a [T]> + Debug,
 {
     type Seed = distances::pq::Overlay<T, u8>;
@@ -1651,7 +1497,7 @@ where
 
     fn finish<Itr>(
         &self,
-        _provider: &BfTreeProvider<T, QuantVectorProvider, D>,
+        _provider: &BfTreeProvider<T, QuantVectorProvider>,
         _ctx: &DefaultContext,
         batch: &std::sync::Arc<B>,
         ids: Itr,
@@ -1664,19 +1510,30 @@ where
     }
 }
 
-/// Inplace Delete
-///
-impl<T, Q, D> InplaceDeleteStrategy<BfTreeProvider<T, Q, D>> for FullPrecision
+// just to shut up the compiler
+impl<'a, T, Q> AsDeletionCheck for FullAccessor<'a, T, Q>
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-    D: AsyncFriendly + DeletionCheck,
+{
+    type Checker = NoDeletes;
+    fn as_deletion_check(&self) -> &NoDeletes {
+        &NoDeletes
+    }
+}
+
+/// Inplace Delete
+///
+impl<T, Q> InplaceDeleteStrategy<BfTreeProvider<T, Q>> for FullPrecision
+where
+    T: VectorRepr,
+    Q: AsyncFriendly,
 {
     type DeleteElementError = Panics;
     type DeleteElement<'a> = &'a [T];
     type DeleteElementGuard = Box<[T]>;
     type PruneStrategy = Self;
-    type DeleteSearchAccessor<'a> = FullAccessor<'a, T, Q, D>;
+    type DeleteSearchAccessor<'a> = FullAccessor<'a, T, Q>;
     type SearchPostProcessor = RemoveDeletedIdsAndCopy;
     type SearchStrategy = Self;
     fn search_strategy(&self) -> Self::SearchStrategy {
@@ -1693,7 +1550,7 @@ where
 
     async fn get_delete_element<'a>(
         &'a self,
-        provider: &'a BfTreeProvider<T, Q, D>,
+        provider: &'a BfTreeProvider<T, Q>,
         _context: &'a DefaultContext,
         id: u32,
     ) -> Result<Self::DeleteElementGuard, Self::DeleteElementError> {
@@ -1707,16 +1564,15 @@ where
     }
 }
 
-impl<T, D> InplaceDeleteStrategy<BfTreeProvider<T, QuantVectorProvider, D>> for Hybrid
+impl<T> InplaceDeleteStrategy<BfTreeProvider<T, QuantVectorProvider>> for Hybrid
 where
     T: VectorRepr,
-    D: AsyncFriendly + DeletionCheck,
 {
     type DeleteElementError = Panics;
     type DeleteElement<'a> = &'a [T];
     type DeleteElementGuard = Box<[T]>;
     type PruneStrategy = Self;
-    type DeleteSearchAccessor<'a> = QuantAccessor<'a, T, D>;
+    type DeleteSearchAccessor<'a> = QuantAccessor<'a, T>;
     type SearchPostProcessor = Rerank;
     type SearchStrategy = Self;
     fn search_strategy(&self) -> Self::SearchStrategy {
@@ -1733,7 +1589,7 @@ where
 
     async fn get_delete_element<'a>(
         &'a self,
-        provider: &'a BfTreeProvider<T, QuantVectorProvider, D>,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
         _context: &'a DefaultContext,
         id: u32,
     ) -> Result<Self::DeleteElementGuard, Self::DeleteElementError> {
@@ -1933,9 +1789,11 @@ fn load_bftree(
     }
 }
 
-// SaveWith/LoadWith for BfTreeProvider with TableDeleteProviderAsync
+//////////////////////
+// Serialization    //
+//////////////////////
 
-impl<T> SaveWith<String> for BfTreeProvider<T, NoStore, TableDeleteProviderAsync>
+impl<T> SaveWith<String> for BfTreeProvider<T, NoStore>
 where
     T: VectorRepr,
 {
@@ -1964,19 +1822,17 @@ where
                 max_record_size: self.neighbor_provider.config().get_cb_max_record_size(),
                 leaf_page_size: self.neighbor_provider.config().get_leaf_page_size(),
             },
-            quant_params: None, // No quantization parameters
+            quant_params: None,
             graph_params: self.graph_params.clone(),
             is_memory: self.full_vectors.config().is_memory_backend(),
         };
 
-        // All stores must use the same storage backend.
         debug_assert_eq!(
             self.full_vectors.config().is_memory_backend(),
             self.neighbor_provider.config().is_memory_backend(),
             "Vector and neighbor stores have mismatched storage backends"
         );
 
-        // Save only essential parameters as JSON
         {
             let params_filename = BfTreePaths::params_json(&saved_params.prefix);
             let params_json = serde_json::to_string(&saved_params).map_err(|e| {
@@ -1986,7 +1842,6 @@ where
             params_writer.write_all(params_json.as_bytes())?;
         }
 
-        // Save vectors and neighbors
         save_bftree(
             self.full_vectors.bftree(),
             BfTreePaths::vectors_bftree(&saved_params.prefix),
@@ -1998,19 +1853,11 @@ where
         )
         .await?;
 
-        // Save delete bitmap
-        {
-            let filename = BfTreePaths::delete_bin(&saved_params.prefix);
-            let bitmap_bytes = super::delete_bitmap_serde::delete_bitmap_to_bytes(&self.deleted);
-            let mut writer = storage.create_for_write(&filename)?;
-            writer.write_all(&bitmap_bytes)?;
-        }
-
         Ok(0)
     }
 }
 
-impl<T> LoadWith<String> for BfTreeProvider<T, NoStore, TableDeleteProviderAsync>
+impl<T> LoadWith<String> for BfTreeProvider<T, NoStore>
 where
     T: VectorRepr,
 {
@@ -2020,7 +1867,6 @@ where
     where
         P: StorageReadProvider,
     {
-        // Read SavedParams from JSON file
         let saved_params: SavedParams = {
             let params_filename = BfTreePaths::params_json(prefix);
             let mut params_reader = storage.open_reader(&params_filename)?;
@@ -2029,9 +1875,8 @@ where
             serde_json::from_str(&params_json).map_err(|e| {
                 ANNError::log_index_error(format!("Failed to deserialize params: {}", e))
             })?
-        }; // params_reader is dropped here
+        };
 
-        // Convert metric string back to Metric enum
         let metric = Metric::from_str(&saved_params.metric)
             .map_err(|e| ANNError::log_index_error(format!("Failed to parse metric: {}", e)))?;
 
@@ -2055,26 +1900,10 @@ where
         let neighbor_provider =
             NeighborProvider::<u32>::new_from_bftree(saved_params.max_degree, adjacency_list_index);
 
-        // Load delete bitmap
-        let total_points = saved_params.max_points + saved_params.frozen_points.get();
-        let filename = BfTreePaths::delete_bin(&saved_params.prefix);
-
-        let deleted = if storage.exists(&filename) {
-            let mut reader = storage.open_reader(&filename)?;
-            let mut bitmap_bytes = Vec::new();
-            reader.read_to_end(&mut bitmap_bytes)?;
-            super::delete_bitmap_serde::delete_bitmap_from_bytes(&bitmap_bytes, total_points)
-                .map_err(|e| ANNError::log_index_error(e))?
-        } else {
-            // If file doesn't exist, create a new empty delete provider
-            TableDeleteProviderAsync::new(total_points)
-        };
-
         Ok(Self {
             quant_vectors: NoStore,
             full_vectors,
             neighbor_provider,
-            deleted,
             max_fp_vecs_per_fill: 0,
             metric,
             graph_params: saved_params.graph_params,
@@ -2082,7 +1911,7 @@ where
     }
 }
 
-impl<T> SaveWith<String> for BfTreeProvider<T, QuantVectorProvider, TableDeleteProviderAsync>
+impl<T> SaveWith<String> for BfTreeProvider<T, QuantVectorProvider>
 where
     T: VectorRepr,
 {
@@ -2123,7 +1952,6 @@ where
             is_memory: self.full_vectors.config().is_memory_backend(),
         };
 
-        // All stores must use the same storage backend.
         debug_assert_eq!(
             self.full_vectors.config().is_memory_backend(),
             self.neighbor_provider.config().is_memory_backend(),
@@ -2135,7 +1963,6 @@ where
             "Vector and quant stores have mismatched storage backends"
         );
 
-        // Save only essential parameters as JSON
         {
             let params_filename = BfTreePaths::params_json(&saved_params.prefix);
             let params_json = serde_json::to_string(&saved_params).map_err(|e| {
@@ -2145,7 +1972,6 @@ where
             params_writer.write_all(params_json.as_bytes())?;
         }
 
-        // Save vectors, neighbors, and quant vectors
         save_bftree(
             self.full_vectors.bftree(),
             BfTreePaths::vectors_bftree(&saved_params.prefix),
@@ -2162,7 +1988,6 @@ where
         )
         .await?;
 
-        // Save PQ table metadata and data using PQStorage format
         let filename = BfTreePaths::quant_data_bin(&saved_params.prefix);
         let serialized = self
             .quant_vectors
@@ -2172,19 +1997,11 @@ where
         let mut writer = storage.create_for_write(&filename)?;
         writer.write_all(&serialized)?;
 
-        // Save delete bitmap
-        {
-            let filename = BfTreePaths::delete_bin(&saved_params.prefix);
-            let bitmap_bytes = super::delete_bitmap_serde::delete_bitmap_to_bytes(&self.deleted);
-            let mut writer = storage.create_for_write(&filename)?;
-            writer.write_all(&bitmap_bytes)?;
-        }
-
         Ok(0)
     }
 }
 
-impl<T> LoadWith<String> for BfTreeProvider<T, QuantVectorProvider, TableDeleteProviderAsync>
+impl<T> LoadWith<String> for BfTreeProvider<T, QuantVectorProvider>
 where
     T: VectorRepr,
 {
@@ -2194,7 +2011,6 @@ where
     where
         P: StorageReadProvider,
     {
-        // Read SavedParams from JSON file
         let saved_params: SavedParams = {
             let params_filename = BfTreePaths::params_json(prefix);
             let mut params_reader = storage.open_reader(&params_filename)?;
@@ -2203,14 +2019,12 @@ where
             serde_json::from_str(&params_json).map_err(|e| {
                 ANNError::log_index_error(format!("Failed to deserialize params: {}", e))
             })?
-        }; // params_reader is dropped here
+        };
 
-        // Extract quant_params - required for quantized provider
         let quant_params = saved_params.quant_params.ok_or_else(|| {
             ANNError::log_index_error("Missing quant_params in saved params for quantized provider")
         })?;
 
-        // Convert metric string back to Metric enum
         let metric = Metric::from_str(&saved_params.metric)
             .map_err(|e| ANNError::log_index_error(format!("Failed to parse metric: {}", e)))?;
 
@@ -2234,9 +2048,7 @@ where
         let neighbor_provider =
             NeighborProvider::<u32>::new_from_bftree(saved_params.max_degree, adjacency_list_index);
 
-        // Read PQ table from file using PQStorage format
         let filename = BfTreePaths::quant_data_bin(&saved_params.prefix);
-
         let mut reader = storage.open_reader(&filename)?;
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
@@ -2256,26 +2068,10 @@ where
             quant_vector_index,
         );
 
-        // Load delete bitmap
-        let total_points = saved_params.max_points + saved_params.frozen_points.get();
-        let filename = BfTreePaths::delete_bin(&saved_params.prefix);
-
-        let deleted = if storage.exists(&filename) {
-            let mut reader = storage.open_reader(&filename)?;
-            let mut bitmap_bytes = Vec::new();
-            reader.read_to_end(&mut bitmap_bytes)?;
-            super::delete_bitmap_serde::delete_bitmap_from_bytes(&bitmap_bytes, total_points)
-                .map_err(|e| ANNError::log_index_error(e))?
-        } else {
-            // If file doesn't exist, create a new empty delete provider
-            TableDeleteProviderAsync::new(total_points)
-        };
-
         Ok(Self {
             quant_vectors,
             full_vectors,
             neighbor_provider,
-            deleted,
             max_fp_vecs_per_fill: quant_params.max_fp_vecs_per_fill,
             metric,
             graph_params: saved_params.graph_params,
@@ -2298,7 +2094,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diskann_providers::model::graph::provider::async_::common::TableBasedDeletes;
     use diskann_providers::storage::FileStorageProvider;
     use diskann_quantization::{
         algorithms::TransformKind,
@@ -2355,7 +2150,6 @@ mod tests {
                 graph_params: None,
             },
             NoStore,
-            TableBasedDeletes,
         )
         .unwrap();
 
@@ -2364,6 +2158,13 @@ mod tests {
         assert_eq!((&provider).into_iter(), 0..(10 + 2));
 
         let iter = provider.iter();
+
+        // Insert vectors so they exist in the bf_tree (hard-delete checks presence)
+        for i in iter.clone() {
+            let vector: Vec<f32> = (0..5).map(|j| (i * 5 + j) as f32).collect();
+            provider.set_element(ctx, &i, &vector).await.unwrap();
+        }
+
         for i in iter.clone() {
             assert_eq!(provider.to_external_id(ctx, i).unwrap(), i);
             assert_eq!(provider.to_internal_id(ctx, &i).unwrap(), i);
@@ -2389,45 +2190,13 @@ mod tests {
             );
         }
 
-        // Call `release` to "undelete" it ID.
-        //
+        // With hard deletes, `release` is a no-op (data is permanently removed).
+        // Verify that released IDs remain deleted.
         for i in iter.clone() {
-            // set adjacency list to non-empty before release
-            provider
-                .neighbor_provider
-                .set_neighbors(i, &[1, 2])
-                .unwrap();
             provider.release(ctx, i).await.unwrap();
             assert_eq!(
                 provider.status_by_internal_id(ctx, i).await.unwrap(),
-                ElementStatus::Valid
-            );
-            assert_eq!(
-                provider.status_by_external_id(ctx, &i).await.unwrap(),
-                ElementStatus::Valid
-            );
-            // check that adjacency list was reset after release
-            let mut neighbors = AdjacencyList::new();
-            provider
-                .neighbor_provider
-                .get_neighbors(i, &mut neighbors)
-                .unwrap();
-            assert!(neighbors.to_vec().is_empty());
-
-            // Put it back to "deleted" to test `clear`.
-            //
-            provider.delete(ctx, &i).await.unwrap();
-        }
-
-        provider.clear_delete_set();
-        for i in iter.clone() {
-            assert_eq!(
-                provider.status_by_internal_id(ctx, i).await.unwrap(),
-                ElementStatus::Valid
-            );
-            assert_eq!(
-                provider.status_by_external_id(ctx, &i).await.unwrap(),
-                ElementStatus::Valid
+                ElementStatus::Deleted
             );
         }
 
@@ -2448,7 +2217,7 @@ mod tests {
     async fn test_empty_neighbor_list() {
         let num_points = 100u32;
         let ctx = &DefaultContext;
-        let provider = BfTreeProvider::<f32, _, _>::new_empty(
+        let provider = BfTreeProvider::<f32, _>::new_empty(
             BfTreeProviderParameters {
                 max_points: num_points as usize,
                 num_start_points: NonZeroUsize::new(2).unwrap(),
@@ -2462,7 +2231,6 @@ mod tests {
                 graph_params: None,
             },
             NoStore,
-            TableBasedDeletes,
         )
         .unwrap();
 
@@ -2571,12 +2339,7 @@ mod tests {
         };
 
         // Create provider
-        let provider = BfTreeProvider::<f32, NoStore, TableDeleteProviderAsync>::new_empty(
-            params.clone(),
-            NoStore,
-            TableBasedDeletes,
-        )
-        .unwrap();
+        let provider = BfTreeProvider::<f32, NoStore>::new_empty(params.clone(), NoStore).unwrap();
 
         // Populate provider with vectors
         for i in 0..num_points {
@@ -2599,16 +2362,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Delete some vectors to test deletion persistence
-        let deleted_ids = vec![5u32, 10u32, 15u32, 20u32, 25u32];
-        for id in &deleted_ids {
-            provider.delete(ctx, id).await.unwrap();
-            assert_eq!(
-                provider.status_by_internal_id(ctx, *id).await.unwrap(),
-                ElementStatus::Deleted
-            );
-        }
-
         assert_eq!(vector_config.get_leaf_page_size(), 8192);
         assert_eq!(vector_config.get_cb_max_record_size(), 1024);
 
@@ -2624,12 +2377,9 @@ mod tests {
         provider.save_with(&storage, &save_prefix).await.unwrap();
 
         // Load using trait method (includes delete bitmap)
-        let loaded_provider = BfTreeProvider::<f32, NoStore, TableDeleteProviderAsync>::load_with(
-            &storage,
-            &save_prefix,
-        )
-        .await
-        .unwrap();
+        let loaded_provider = BfTreeProvider::<f32, NoStore>::load_with(&storage, &save_prefix)
+            .await
+            .unwrap();
 
         // Verify vectors
         for i in 0..num_points as u32 {
@@ -2660,31 +2410,6 @@ mod tests {
                 "Neighbor list mismatch at index {}",
                 i
             );
-        }
-
-        // Verify deleted status persists across save/load
-        for id in &deleted_ids {
-            assert_eq!(
-                loaded_provider
-                    .status_by_internal_id(ctx, *id)
-                    .await
-                    .unwrap(),
-                ElementStatus::Deleted,
-                "Deletion status not preserved for id {}",
-                id
-            );
-        }
-
-        // Verify non-deleted vectors remain valid
-        for i in 0..num_points as u32 {
-            if !deleted_ids.contains(&i) {
-                assert_eq!(
-                    loaded_provider.status_by_internal_id(ctx, i).await.unwrap(),
-                    ElementStatus::Valid,
-                    "Non-deleted vector {} incorrectly marked as deleted",
-                    i
-                );
-            }
         }
 
         // Cleanup is automatic when temp_dir goes out of scope
@@ -2743,12 +2468,8 @@ mod tests {
 
         // Create provider with quantization
         let provider =
-            BfTreeProvider::<f32, QuantVectorProvider, TableDeleteProviderAsync>::new_empty(
-                params.clone(),
-                quantizer,
-                TableBasedDeletes,
-            )
-            .unwrap();
+            BfTreeProvider::<f32, QuantVectorProvider>::new_empty(params.clone(), quantizer)
+                .unwrap();
 
         // Populate provider with vectors
         for i in 0..num_points {
@@ -2771,16 +2492,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Delete some vectors to test deletion persistence
-        let deleted_ids = vec![3u32, 8u32, 15u32, 22u32, 30u32];
-        for id in &deleted_ids {
-            provider.delete(ctx, id).await.unwrap();
-            assert_eq!(
-                provider.status_by_internal_id(ctx, *id).await.unwrap(),
-                ElementStatus::Deleted
-            );
-        }
-
         let storage = FileStorageProvider;
 
         // Save to a different prefix to exercise the snapshot copy logic
@@ -2794,12 +2505,9 @@ mod tests {
 
         // Load using trait method (includes delete bitmap and quantization)
         let loaded_provider =
-            BfTreeProvider::<f32, QuantVectorProvider, TableDeleteProviderAsync>::load_with(
-                &storage,
-                &save_prefix,
-            )
-            .await
-            .unwrap();
+            BfTreeProvider::<f32, QuantVectorProvider>::load_with(&storage, &save_prefix)
+                .await
+                .unwrap();
 
         // Verify quantizer properties match after round-trip
         assert_eq!(
@@ -2859,31 +2567,6 @@ mod tests {
             );
         }
 
-        // Verify deleted status persists across save/load
-        for id in &deleted_ids {
-            assert_eq!(
-                loaded_provider
-                    .status_by_internal_id(ctx, *id)
-                    .await
-                    .unwrap(),
-                ElementStatus::Deleted,
-                "Deletion status not preserved for id {}",
-                id
-            );
-        }
-
-        // Verify non-deleted vectors remain valid
-        for i in 0..num_points as u32 {
-            if !deleted_ids.contains(&i) {
-                assert_eq!(
-                    loaded_provider.status_by_internal_id(ctx, i).await.unwrap(),
-                    ElementStatus::Valid,
-                    "Non-deleted vector {} incorrectly marked as deleted",
-                    i
-                );
-            }
-        }
-
         // Cleanup is automatic when temp_dir goes out of scope
     }
 
@@ -2897,7 +2580,7 @@ mod tests {
         let ctx = &DefaultContext;
 
         // In-memory config (no file path needed)
-        let provider = BfTreeProvider::<f32, NoStore, TableDeleteProviderAsync>::new_empty(
+        let provider = BfTreeProvider::<f32, NoStore>::new_empty(
             BfTreeProviderParameters {
                 max_points: num_points,
                 num_start_points,
@@ -2911,7 +2594,6 @@ mod tests {
                 graph_params: None,
             },
             NoStore,
-            TableBasedDeletes,
         )
         .unwrap();
 
@@ -2949,15 +2631,15 @@ mod tests {
         provider.save_with(&storage, &save_prefix).await.unwrap();
 
         // Load back
-        let loaded = BfTreeProvider::<f32, NoStore, TableDeleteProviderAsync>::load_with(
-            &storage,
-            &save_prefix,
-        )
-        .await
-        .unwrap();
+        let loaded = BfTreeProvider::<f32, NoStore>::load_with(&storage, &save_prefix)
+            .await
+            .unwrap();
 
         // Verify vectors
         for i in 0..num_points as u32 {
+            if i == 3 || i == 7 {
+                continue;
+            }
             assert_eq!(
                 provider.full_vectors.get_vector_sync(i as usize).unwrap(),
                 loaded.full_vectors.get_vector_sync(i as usize).unwrap(),
@@ -3007,24 +2689,22 @@ mod tests {
 
         let quantizer = create_test_quantizer(dim);
 
-        let provider =
-            BfTreeProvider::<f32, QuantVectorProvider, TableDeleteProviderAsync>::new_empty(
-                BfTreeProviderParameters {
-                    max_points: num_points,
-                    num_start_points,
-                    dim,
-                    metric: Metric::L2,
-                    max_fp_vecs_per_fill: Some(5),
-                    max_degree,
-                    vector_provider_config: Config::default(),
-                    quant_vector_provider_config: Config::default(),
-                    neighbor_list_provider_config: Config::default(),
-                    graph_params: None,
-                },
-                quantizer,
-                TableBasedDeletes,
-            )
-            .unwrap();
+        let provider = BfTreeProvider::<f32, QuantVectorProvider>::new_empty(
+            BfTreeProviderParameters {
+                max_points: num_points,
+                num_start_points,
+                dim,
+                metric: Metric::L2,
+                max_fp_vecs_per_fill: Some(5),
+                max_degree,
+                vector_provider_config: Config::default(),
+                quant_vector_provider_config: Config::default(),
+                neighbor_list_provider_config: Config::default(),
+                graph_params: None,
+            },
+            quantizer,
+        )
+        .unwrap();
 
         // Populate vectors and neighbors
         for i in 0..num_points {
@@ -3058,16 +2738,15 @@ mod tests {
         provider.save_with(&storage, &save_prefix).await.unwrap();
 
         // Load back
-        let loaded =
-            BfTreeProvider::<f32, QuantVectorProvider, TableDeleteProviderAsync>::load_with(
-                &storage,
-                &save_prefix,
-            )
+        let loaded = BfTreeProvider::<f32, QuantVectorProvider>::load_with(&storage, &save_prefix)
             .await
             .unwrap();
 
-        // Verify full vectors
+        // Verify full vectors (skip deleted id 2)
         for i in 0..num_points as u32 {
+            if i == 2 {
+                continue;
+            }
             assert_eq!(
                 provider.full_vectors.get_vector_sync(i as usize).unwrap(),
                 loaded.full_vectors.get_vector_sync(i as usize).unwrap(),
@@ -3076,8 +2755,11 @@ mod tests {
             );
         }
 
-        // Verify quant vectors
+        // Verify quant vectors (skip deleted id 2)
         for i in 0..num_points as u32 {
+            if i == 2 {
+                continue;
+            }
             assert_eq!(
                 provider.quant_vectors.get_vector_sync(i as usize).unwrap(),
                 loaded.quant_vectors.get_vector_sync(i as usize).unwrap(),
@@ -3086,8 +2768,11 @@ mod tests {
             );
         }
 
-        // Verify neighbors
+        // Verify neighbors (skip deleted id 2)
         for i in 0..num_points as u32 {
+            if i == 2 {
+                continue;
+            }
             let mut orig = AdjacencyList::new();
             let mut load = AdjacencyList::new();
             provider

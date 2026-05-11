@@ -191,6 +191,11 @@ impl<T: VectorRepr, I: VectorId> VectorProvider<T, I> {
         self.get_vector_into(i, &mut vector)?;
         Ok(vector)
     }
+
+    pub(crate) fn delete_vector(&self, i: usize) {
+        let key = bytes_of::<usize>(&i);
+        self.vector_index.delete(key);
+    }
 }
 
 ///////////

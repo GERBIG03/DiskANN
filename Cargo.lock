@@ -734,7 +734,6 @@ version = "0.51.0"
 dependencies = [
  "bf-tree",
  "bytemuck",
- "criterion",
  "diskann",
  "diskann-providers",
  "diskann-quantization",
@@ -742,7 +741,6 @@ dependencies = [
  "diskann-vector",
  "futures-util",
  "half",
- "iai-callgrind",
  "polonius-the-crab",
  "rand 0.9.4",
  "rstest",
