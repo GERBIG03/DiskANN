@@ -12,7 +12,9 @@ use bytemuck::bytes_of;
 use diskann::{error::IntoANNResult, utils::VectorRepr, ANNError, ANNResult};
 use diskann_quantization::{
     alloc::{GlobalAllocator, Poly, ScopedAllocator},
-    spherical::iface::{DistanceComputer, Opaque, OpaqueMut, Quantizer, QueryComputer, QueryLayout},
+    spherical::iface::{
+        DistanceComputer, Opaque, OpaqueMut, Quantizer, QueryComputer, QueryLayout,
+    },
 };
 use diskann_vector::{distance::Metric, PreprocessedDistanceFunction};
 

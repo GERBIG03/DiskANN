@@ -41,13 +41,12 @@ use diskann_utils::{future::AsyncFriendly, views::MatrixView};
 use diskann_vector::distance::Metric;
 
 use super::{
-    quant_vector_provider::QuantVectorProvider,
-    neighbor_provider::NeighborProvider,
+    neighbor_provider::NeighborProvider, quant_vector_provider::QuantVectorProvider,
     vector_provider::VectorProvider,
 };
 use diskann::graph::glue::{AsDeletionCheck, RemoveDeletedIdsAndCopy};
-use diskann_providers::model::graph::provider::async_::{
-    common::{FullPrecision, NoDeletes, NoStore, Panics},
+use diskann_providers::model::graph::provider::async_::common::{
+    FullPrecision, NoDeletes, NoStore, Panics,
 };
 use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, StorageWriteProvider};
 
