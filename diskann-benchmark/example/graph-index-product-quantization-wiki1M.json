@@ -17,11 +17,7 @@
             "alpha": 1.2,
             "backedge_ratio": 1.0,
             "num_threads": 32,
-            "multi_insert": {
-              "batch_size": 128,
-              "batch_parallelism": 32,
-              "intra_batch_candidates": "all"
-            }
+            "multi_insert": null
           },
           "search_phase": {
             "search-type": "topk",
