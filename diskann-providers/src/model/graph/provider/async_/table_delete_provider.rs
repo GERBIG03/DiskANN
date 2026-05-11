@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use diskann::utils::IntoUsize;
 
+use super::postprocess;
+
 pub struct TableDeleteProviderAsync {
     delete_table: Vec<AtomicU32>,
     pub max_size: usize,
@@ -87,7 +89,7 @@ impl TableDeleteProviderAsync {
     }
 }
 
-impl super::postprocess::DeletionCheck for TableDeleteProviderAsync {
+impl postprocess::DeletionCheck for TableDeleteProviderAsync {
     fn deletion_check(&self, id: u32) -> bool {
         self.is_deleted(id.into_usize())
     }

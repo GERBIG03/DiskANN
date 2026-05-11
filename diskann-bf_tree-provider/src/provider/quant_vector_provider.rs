@@ -123,7 +123,6 @@ impl QuantVectorProvider {
             .map_err(|e| ANNError::log_sq_error(e))
     }
 
-    #[cfg(test)]
     pub(crate) fn get_vector_into(&self, i: usize, buffer: &mut [u8]) -> ANNResult<()> {
         use diskann::ANNErrorKind;
         use thiserror::Error;
@@ -174,7 +173,6 @@ impl QuantVectorProvider {
     }
 
     /// Return the quant vector at index `i`.
-    #[cfg(test)]
     pub(crate) fn get_vector_sync(&self, i: usize) -> ANNResult<Vec<u8>> {
         let mut value = vec![0u8; self.quantizer.bytes()];
         self.get_vector_into(i, &mut value)?;

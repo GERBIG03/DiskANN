@@ -14,7 +14,7 @@ use std::{
 
 use diskann_quantization::{
     alloc::{GlobalAllocator, Poly},
-    spherical::iface::{try_deserialize, Quantizer},
+    spherical::iface::{self as spherical_iface, try_deserialize, Opaque, Quantizer},
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,7 @@ use diskann::{
             self, Batch, CopyIds, DefaultPostProcessor, ExpandBeam, InplaceDeleteStrategy,
             InsertStrategy, MultiInsertStrategy, PruneStrategy, SearchExt, SearchStrategy,
         },
-        workingset::map,
+        workingset::{self, map},
         AdjacencyList, DiskANNIndex,
     },
     provider::{
@@ -44,7 +44,11 @@ use super::{
     neighbor_provider::NeighborProvider, quant_vector_provider::QuantVectorProvider,
     vector_provider::VectorProvider,
 };
-use diskann_providers::model::graph::provider::async_::common::{FullPrecision, NoStore, Panics};
+use diskann_providers::model::graph::provider::async_::{
+    common::{FullPrecision, NoStore, Panics, Quantized},
+    distances::UnwrapErr,
+    inmem::PassThrough,
+};
 use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, StorageWriteProvider};
 
 /////////////////////
@@ -957,6 +961,222 @@ where
 {
 }
 
+///////////////////
+// QuantAccessor //
+///////////////////
+
+/// An accessor that retrieves the quantized portion of the [`BfTreeProvider`].
+///
+/// This type implements the following traits:
+///
+/// * [`Accessor`] for the `BfTreeProvider`.
+/// * [`BuildQueryComputer`].
+///
+pub struct QuantAccessor<'a, T>
+where
+    T: VectorRepr,
+{
+    provider: &'a BfTreeProvider<T, QuantVectorProvider>,
+    element: Box<[u8]>,
+}
+
+impl<T> HasId for QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    type Id = u32;
+}
+
+impl<T> SearchExt for QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    fn starting_points(&self) -> impl Future<Output = ANNResult<Vec<u32>>> {
+        std::future::ready(self.provider.starting_points())
+    }
+}
+
+impl<'a, T> QuantAccessor<'a, T>
+where
+    T: VectorRepr,
+{
+    pub(crate) fn new(provider: &'a BfTreeProvider<T, QuantVectorProvider>) -> Self {
+        Self {
+            provider,
+            element: (0..provider.quant_vectors.quantizer.bytes())
+                .map(|_| u8::default())
+                .collect(),
+        }
+    }
+}
+
+impl<'a, T> DelegateNeighbor<'a> for QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    type Delegate = &'a NeighborProvider<u32>;
+    fn delegate_neighbor(&'a mut self) -> Self::Delegate {
+        self.provider.neighbors()
+    }
+}
+
+impl<T> Accessor for QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    /// This accessor returns a reference to a local copy of the element.
+    type Element<'a>
+        = Opaque<'a>
+    where
+        Self: 'a;
+
+    /// The reference version of `Element` is simply `Element`.
+    type ElementRef<'a> = Opaque<'a>;
+
+    // ANNError on access failures in bf-tree
+    //
+    type GetError = ANNError;
+
+    /// Return the quantized vector stored at index `i`.
+    ///
+    /// This function always completes synchronously.
+    ///
+    fn get_element(
+        &mut self,
+        id: Self::Id,
+    ) -> impl Future<Output = Result<Self::Element<'_>, Self::GetError>> + Send {
+        let v = self
+            .provider
+            .quant_vectors
+            .get_vector_into(id.into_usize(), &mut self.element)
+            .map(|_: ()| Opaque::new(&self.element));
+
+        std::future::ready(v)
+    }
+
+    /// Perform a bulk operation
+    ///
+    fn on_elements_unordered<Itr, F>(
+        &mut self,
+        itr: Itr,
+        mut f: F,
+    ) -> impl Future<Output = Result<(), Self::GetError>> + Send
+    where
+        Self: Sync,
+        Itr: Iterator<Item = Self::Id> + Send,
+        F: Send + FnMut(Self::ElementRef<'_>, Self::Id),
+    {
+        for i in itr {
+            match self
+                .provider
+                .quant_vectors
+                .get_vector_into(i.into_usize(), &mut self.element)
+            {
+                Ok(()) => f(Opaque::new(&self.element), i),
+                Err(e) => {
+                    return std::future::ready(Err(e));
+                }
+            }
+        }
+        std::future::ready(Ok(()))
+    }
+}
+
+impl<T> BuildQueryComputer<&[T]> for QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    type QueryComputerError = ANNError;
+    type QueryComputer = UnwrapErr<
+        spherical_iface::QueryComputer<GlobalAllocator>,
+        spherical_iface::QueryDistanceError,
+    >;
+
+    fn build_query_computer(
+        &self,
+        from: &[T],
+    ) -> Result<Self::QueryComputer, Self::QueryComputerError> {
+        self.provider
+            .quant_vectors
+            .query_computer(from)
+            .map(|qc| UnwrapErr::new(qc.0))
+    }
+}
+
+impl<T> ExpandBeam<&[T]> for QuantAccessor<'_, T> where T: VectorRepr {}
+
+impl<T> BuildDistanceComputer for QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    type DistanceComputerError = ANNError;
+    type DistanceComputer =
+        UnwrapErr<spherical_iface::DistanceComputer, spherical_iface::DistanceError>;
+
+    fn build_distance_computer(
+        &self,
+    ) -> Result<Self::DistanceComputer, Self::DistanceComputerError> {
+        self.provider
+            .quant_vectors
+            .distance_computer()
+            .map(UnwrapErr::new)
+    }
+}
+
+// Pass-through fill — returns `&Self` which directly accesses the underlying provider.
+impl<T> workingset::Fill<PassThrough> for QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    type Error = std::convert::Infallible;
+    type View<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
+    async fn fill<'a, Itr>(
+        &'a mut self,
+        _state: &'a mut PassThrough,
+        _itr: Itr,
+    ) -> Result<Self::View<'a>, Self::Error>
+    where
+        Itr: ExactSizeIterator<Item = Self::Id> + Clone + Send + Sync,
+        Self: 'a,
+    {
+        Ok(self)
+    }
+}
+
+/// An owned quantized vector that reborrows to [`Opaque`].
+pub struct OwnedOpaque(Vec<u8>);
+
+impl<'short> diskann_utils::Reborrow<'short> for OwnedOpaque {
+    type Target = Opaque<'short>;
+    fn reborrow(&'short self) -> Self::Target {
+        Opaque::new(&self.0)
+    }
+}
+
+// Pass-through view — reads quantized vectors directly from the provider.
+impl<T> workingset::View<u32> for &QuantAccessor<'_, T>
+where
+    T: VectorRepr,
+{
+    type ElementRef<'a> = Opaque<'a>;
+    type Element<'a>
+        = OwnedOpaque
+    where
+        Self: 'a;
+
+    fn get(&self, id: u32) -> Option<Self::Element<'_>> {
+        self.provider
+            .quant_vectors
+            .get_vector_sync(id.into_usize())
+            .ok()
+            .map(OwnedOpaque)
+    }
+}
+
 ////////////////
 // Strategies //
 ////////////////
@@ -1095,6 +1315,141 @@ where
             .expect("Failed to get delete element")
             .into();
         Ok(elt)
+    }
+}
+
+/// Perform a search entirely in the quantized space.
+///
+/// Starting points are not filtered out of the final results.
+impl<T> SearchStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Quantized
+where
+    T: VectorRepr,
+{
+    type QueryComputer = UnwrapErr<
+        spherical_iface::QueryComputer<GlobalAllocator>,
+        spherical_iface::QueryDistanceError,
+    >;
+    type SearchAccessor<'a> = QuantAccessor<'a, T>;
+    type SearchAccessorError = ANNError;
+
+    fn search_accessor<'a>(
+        &'a self,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
+        _context: &'a DefaultContext,
+    ) -> Result<Self::SearchAccessor<'a>, Self::SearchAccessorError> {
+        Ok(QuantAccessor::new(provider))
+    }
+}
+
+impl<T> DefaultPostProcessor<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Quantized
+where
+    T: VectorRepr,
+{
+    default_post_processor!(glue::Pipeline<glue::FilterStartPoints, CopyIds>);
+}
+
+impl<T> InsertStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Quantized
+where
+    T: VectorRepr,
+{
+    type PruneStrategy = Self;
+    fn prune_strategy(&self) -> Self::PruneStrategy {
+        *self
+    }
+}
+
+impl<T, B> MultiInsertStrategy<BfTreeProvider<T, QuantVectorProvider>, B> for Quantized
+where
+    T: VectorRepr,
+    B: glue::Batch,
+    Self: for<'a> InsertStrategy<
+        BfTreeProvider<T, QuantVectorProvider>,
+        B::Element<'a>,
+        PruneStrategy = Self,
+    >,
+{
+    type Seed = PassThrough;
+    type WorkingSet = PassThrough;
+    type FinishError = diskann::error::Infallible;
+    type InsertStrategy = Self;
+
+    fn insert_strategy(&self) -> Self::InsertStrategy {
+        *self
+    }
+
+    fn finish<Itr>(
+        &self,
+        _provider: &BfTreeProvider<T, QuantVectorProvider>,
+        _ctx: &DefaultContext,
+        _batch: &std::sync::Arc<B>,
+        _ids: Itr,
+    ) -> impl std::future::Future<Output = Result<Self::Seed, Self::FinishError>> + Send
+    where
+        Itr: ExactSizeIterator<Item = u32> + Send,
+    {
+        std::future::ready(Ok(PassThrough))
+    }
+}
+
+/// Inplace Delete
+///
+impl<T> InplaceDeleteStrategy<BfTreeProvider<T, QuantVectorProvider>> for Quantized
+where
+    T: VectorRepr,
+{
+    type DeleteElementError = ANNError;
+    type DeleteElement<'a> = &'a [T];
+    type DeleteElementGuard = Box<[T]>;
+    type PruneStrategy = Self;
+    type DeleteSearchAccessor<'a> = QuantAccessor<'a, T>;
+    type SearchPostProcessor = CopyIds;
+    type SearchStrategy = Self;
+    fn search_strategy(&self) -> Self::SearchStrategy {
+        *self
+    }
+
+    fn prune_strategy(&self) -> Self::PruneStrategy {
+        *self
+    }
+
+    fn search_post_processor(&self) -> Self::SearchPostProcessor {
+        CopyIds
+    }
+
+    async fn get_delete_element<'a>(
+        &'a self,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
+        _context: &'a DefaultContext,
+        id: u32,
+    ) -> Result<Self::DeleteElementGuard, Self::DeleteElementError> {
+        provider
+            .full_vectors
+            .get_vector_sync(id.into_usize())
+            .map(Into::into)
+    }
+}
+
+// Pruning
+impl<T> PruneStrategy<BfTreeProvider<T, QuantVectorProvider>> for Quantized
+where
+    T: VectorRepr,
+{
+    type WorkingSet = PassThrough;
+    type DistanceComputer<'a> =
+        UnwrapErr<spherical_iface::DistanceComputer, spherical_iface::DistanceError>;
+    type PruneAccessor<'a> = QuantAccessor<'a, T>;
+    type PruneAccessorError = diskann::error::Infallible;
+
+    fn prune_accessor<'a>(
+        &'a self,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
+        _context: &'a DefaultContext,
+    ) -> Result<Self::PruneAccessor<'a>, Self::PruneAccessorError> {
+        Ok(QuantAccessor::new(provider))
+    }
+
+    fn create_working_set(&self, _capacity: usize) -> Self::WorkingSet {
+        PassThrough
     }
 }
 
