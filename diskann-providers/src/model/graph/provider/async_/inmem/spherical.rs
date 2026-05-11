@@ -43,11 +43,9 @@ use crate::{
         },
         distances::UnwrapErr,
         inmem::{DefaultProvider, FullPrecisionProvider, FullPrecisionStore},
+        postprocess::{AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy},
     },
     utils::{Bridge, BridgeErr},
-};
-use crate::model::graph::provider::async_::postprocess::{
-    AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy,
 };
 
 /////////////////////

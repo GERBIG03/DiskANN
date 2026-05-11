@@ -563,8 +563,6 @@ where
     }
 }
 
-
-
 /// A strategy for inserting elements from the data provider.
 ///
 /// This strategy is used during the greedy search portion of index construction.

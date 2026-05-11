@@ -37,11 +37,9 @@ use crate::model::{
             DefaultProvider, FullPrecisionProvider, FullPrecisionStore, GetFullPrecision,
             PassThrough, Rerank,
         },
+        postprocess::{AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy},
     },
     pq::{self, FixedChunkPQTable},
-};
-use crate::model::graph::provider::async_::postprocess::{
-    AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy,
 };
 
 /// The default quant provider.

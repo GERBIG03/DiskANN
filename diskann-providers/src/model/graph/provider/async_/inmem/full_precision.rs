@@ -35,9 +35,7 @@ use crate::model::graph::provider::async_::{
         SetElementHelper,
     },
     inmem::{DefaultProvider, PassThrough},
-};
-use crate::model::graph::provider::async_::postprocess::{
-    AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy,
+    postprocess::{AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy},
 };
 
 /// A type alias for the DefaultProvider with full-precision as the primary vector store.
