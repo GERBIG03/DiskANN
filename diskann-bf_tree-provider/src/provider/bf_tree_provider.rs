@@ -27,8 +27,9 @@ use diskann::{
             InsertStrategy, MultiInsertStrategy, PruneStrategy, SearchExt, SearchStrategy,
         },
         workingset::{self, map},
-        AdjacencyList, DiskANNIndex,
+        AdjacencyList, DiskANNIndex, SearchOutputBuffer,
     },
+    neighbor::Neighbor,
     provider::{
         Accessor, BuildDistanceComputer, BuildQueryComputer, DataProvider, DefaultContext,
         DelegateNeighbor, Delete, ElementStatus, HasId, NeighborAccessor, NeighborAccessorMut,
@@ -38,14 +39,14 @@ use diskann::{
     ANNError, ANNResult,
 };
 use diskann_utils::{future::AsyncFriendly, views::MatrixView};
-use diskann_vector::distance::Metric;
+use diskann_vector::{distance::Metric, DistanceFunction};
 
 use super::{
     neighbor_provider::NeighborProvider, quant_vector_provider::QuantVectorProvider,
     vector_provider::VectorProvider,
 };
 use diskann_providers::model::graph::provider::async_::{
-    common::{FullPrecision, NoStore, Panics, Quantized},
+    common::{FullPrecision, Hybrid, NoStore, Panics, Quantized},
     distances::UnwrapErr,
     inmem::PassThrough,
 };
@@ -1450,6 +1451,187 @@ where
 
     fn create_working_set(&self, _capacity: usize) -> Self::WorkingSet {
         PassThrough
+    }
+}
+
+//////////////////////////
+// Hybrid Strategies    //
+//////////////////////////
+
+/// Post-processor that reranks quantized search results using full-precision distances.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Rerank;
+
+impl<'a, T> glue::SearchPostProcess<QuantAccessor<'a, T>, &[T]> for Rerank
+where
+    T: VectorRepr,
+{
+    type Error = Panics;
+
+    fn post_process<I, B>(
+        &self,
+        accessor: &mut QuantAccessor<'a, T>,
+        query: &[T],
+        _computer: &UnwrapErr<
+            spherical_iface::QueryComputer<GlobalAllocator>,
+            spherical_iface::QueryDistanceError,
+        >,
+        candidates: I,
+        output: &mut B,
+    ) -> impl Future<Output = Result<usize, Self::Error>> + Send
+    where
+        I: Iterator<Item = Neighbor<u32>> + Send,
+        B: SearchOutputBuffer<u32> + Send + ?Sized,
+    {
+        let provider = accessor.provider;
+        let f = T::distance(provider.metric, Some(provider.full_vectors.dim()));
+
+        let mut reranked: Vec<(u32, f32)> = candidates
+            .map(|n| {
+                #[allow(clippy::expect_used)]
+                let vec = provider
+                    .full_vectors
+                    .get_vector_sync(n.id.into_usize())
+                    .expect("Full vector provider failed to retrieve element");
+                (n.id, f.evaluate_similarity(query, &vec))
+            })
+            .collect();
+
+        reranked
+            .sort_unstable_by(|a, b| (a.1).partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        std::future::ready(Ok(output.extend(reranked)))
+    }
+}
+
+/// Hybrid strategy: search in quantized space, rerank with full-precision distances,
+/// prune in quantized space.
+impl<T> SearchStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
+where
+    T: VectorRepr,
+{
+    type QueryComputer = UnwrapErr<
+        spherical_iface::QueryComputer<GlobalAllocator>,
+        spherical_iface::QueryDistanceError,
+    >;
+    type SearchAccessor<'a> = QuantAccessor<'a, T>;
+    type SearchAccessorError = ANNError;
+
+    fn search_accessor<'a>(
+        &'a self,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
+        _context: &'a DefaultContext,
+    ) -> Result<Self::SearchAccessor<'a>, Self::SearchAccessorError> {
+        Ok(QuantAccessor::new(provider))
+    }
+}
+
+impl<T> DefaultPostProcessor<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
+where
+    T: VectorRepr,
+{
+    default_post_processor!(glue::Pipeline<glue::FilterStartPoints, Rerank>);
+}
+
+impl<T> PruneStrategy<BfTreeProvider<T, QuantVectorProvider>> for Hybrid
+where
+    T: VectorRepr,
+{
+    type WorkingSet = PassThrough;
+    type DistanceComputer<'a> =
+        UnwrapErr<spherical_iface::DistanceComputer, spherical_iface::DistanceError>;
+    type PruneAccessor<'a> = QuantAccessor<'a, T>;
+    type PruneAccessorError = diskann::error::Infallible;
+
+    fn prune_accessor<'a>(
+        &'a self,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
+        _context: &'a DefaultContext,
+    ) -> Result<Self::PruneAccessor<'a>, Self::PruneAccessorError> {
+        Ok(QuantAccessor::new(provider))
+    }
+
+    fn create_working_set(&self, _capacity: usize) -> Self::WorkingSet {
+        PassThrough
+    }
+}
+
+impl<T> InsertStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
+where
+    T: VectorRepr,
+{
+    type PruneStrategy = Self;
+    fn prune_strategy(&self) -> Self::PruneStrategy {
+        *self
+    }
+}
+
+impl<T, B> MultiInsertStrategy<BfTreeProvider<T, QuantVectorProvider>, B> for Hybrid
+where
+    T: VectorRepr,
+    B: glue::Batch,
+    Self: for<'a> InsertStrategy<
+        BfTreeProvider<T, QuantVectorProvider>,
+        B::Element<'a>,
+        PruneStrategy = Self,
+    >,
+{
+    type Seed = PassThrough;
+    type WorkingSet = PassThrough;
+    type FinishError = diskann::error::Infallible;
+    type InsertStrategy = Self;
+
+    fn insert_strategy(&self) -> Self::InsertStrategy {
+        *self
+    }
+
+    fn finish<Itr>(
+        &self,
+        _provider: &BfTreeProvider<T, QuantVectorProvider>,
+        _ctx: &DefaultContext,
+        _batch: &std::sync::Arc<B>,
+        _ids: Itr,
+    ) -> impl std::future::Future<Output = Result<Self::Seed, Self::FinishError>> + Send
+    where
+        Itr: ExactSizeIterator<Item = u32> + Send,
+    {
+        std::future::ready(Ok(PassThrough))
+    }
+}
+
+impl<T> InplaceDeleteStrategy<BfTreeProvider<T, QuantVectorProvider>> for Hybrid
+where
+    T: VectorRepr,
+{
+    type DeleteElementError = ANNError;
+    type DeleteElement<'a> = &'a [T];
+    type DeleteElementGuard = Box<[T]>;
+    type PruneStrategy = Self;
+    type DeleteSearchAccessor<'a> = QuantAccessor<'a, T>;
+    type SearchPostProcessor = Rerank;
+    type SearchStrategy = Self;
+
+    fn search_strategy(&self) -> Self::SearchStrategy {
+        *self
+    }
+
+    fn prune_strategy(&self) -> Self::PruneStrategy {
+        *self
+    }
+
+    fn search_post_processor(&self) -> Self::SearchPostProcessor {
+        Rerank
+    }
+
+    async fn get_delete_element<'a>(
+        &'a self,
+        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
+        _context: &'a DefaultContext,
+        id: u32,
+    ) -> Result<Self::DeleteElementGuard, Self::DeleteElementError> {
+        provider
+            .full_vectors
+            .get_vector_sync(id.into_usize())
+            .map(Into::into)
     }
 }
 
