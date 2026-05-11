@@ -23,8 +23,8 @@ use diskann::{
     default_post_processor,
     graph::{
         glue::{
-            self, Batch, DefaultPostProcessor, ExpandBeam, InplaceDeleteStrategy, InsertStrategy,
-            MultiInsertStrategy, PruneStrategy, SearchExt, SearchStrategy,
+            self, Batch, CopyIds, DefaultPostProcessor, ExpandBeam, InplaceDeleteStrategy,
+            InsertStrategy, MultiInsertStrategy, PruneStrategy, SearchExt, SearchStrategy,
         },
         workingset::map,
         AdjacencyList, DiskANNIndex,
@@ -44,10 +44,7 @@ use super::{
     neighbor_provider::NeighborProvider, quant_vector_provider::QuantVectorProvider,
     vector_provider::VectorProvider,
 };
-use diskann::graph::glue::{AsDeletionCheck, RemoveDeletedIdsAndCopy};
-use diskann_providers::model::graph::provider::async_::common::{
-    FullPrecision, NoDeletes, NoStore, Panics,
-};
+use diskann_providers::model::graph::provider::async_::common::{FullPrecision, NoStore, Panics};
 use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, StorageWriteProvider};
 
 /////////////////////
@@ -990,7 +987,7 @@ where
     T: VectorRepr,
     Q: AsyncFriendly,
 {
-    default_post_processor!(glue::Pipeline<glue::FilterStartPoints, RemoveDeletedIdsAndCopy>);
+    default_post_processor!(glue::Pipeline<glue::FilterStartPoints, CopyIds>);
 }
 
 // Pruning
@@ -1059,18 +1056,6 @@ where
     }
 }
 
-// just to shut up the compiler
-impl<'a, T, Q> AsDeletionCheck for FullAccessor<'a, T, Q>
-where
-    T: VectorRepr,
-    Q: AsyncFriendly,
-{
-    type Checker = NoDeletes;
-    fn as_deletion_check(&self) -> &NoDeletes {
-        &NoDeletes
-    }
-}
-
 /// Inplace Delete
 ///
 impl<T, Q> InplaceDeleteStrategy<BfTreeProvider<T, Q>> for FullPrecision
@@ -1083,7 +1068,7 @@ where
     type DeleteElementGuard = Box<[T]>;
     type PruneStrategy = Self;
     type DeleteSearchAccessor<'a> = FullAccessor<'a, T, Q>;
-    type SearchPostProcessor = RemoveDeletedIdsAndCopy;
+    type SearchPostProcessor = CopyIds;
     type SearchStrategy = Self;
     fn search_strategy(&self) -> Self::SearchStrategy {
         Self
@@ -1094,7 +1079,7 @@ where
     }
 
     fn search_post_processor(&self) -> Self::SearchPostProcessor {
-        RemoveDeletedIdsAndCopy
+        CopyIds
     }
 
     async fn get_delete_element<'a>(
