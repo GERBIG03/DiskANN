@@ -37,7 +37,7 @@ impl TableDeleteProviderAsync {
     }
 
     #[inline]
-    pub fn is_deleted(&self, vector_id: usize) -> bool {
+    pub(crate) fn is_deleted(&self, vector_id: usize) -> bool {
         assert!(vector_id < self.max_size);
         let slot = vector_id / 32;
         let bit = vector_id % 32;
@@ -45,7 +45,7 @@ impl TableDeleteProviderAsync {
         (self.delete_table[slot].load(Ordering::Acquire) & mask) != 0
     }
 
-    pub fn delete(&self, vector_id: usize) {
+    pub(crate) fn delete(&self, vector_id: usize) {
         assert!(vector_id < self.max_size);
         let slot = vector_id / 32;
         let bit = vector_id % 32;
@@ -53,7 +53,7 @@ impl TableDeleteProviderAsync {
         self.delete_table[slot].fetch_or(mask, Ordering::AcqRel);
     }
 
-    pub fn undelete(&self, vector_id: usize) {
+    pub(crate) fn undelete(&self, vector_id: usize) {
         assert!(vector_id < self.max_size);
         let slot = vector_id / 32;
         let bit = vector_id % 32;
@@ -61,7 +61,7 @@ impl TableDeleteProviderAsync {
         self.delete_table[slot].fetch_and(!mask, Ordering::AcqRel);
     }
 
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         for i in 0..self.max_size {
             self.undelete(i);
         }

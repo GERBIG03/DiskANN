@@ -28,7 +28,6 @@ pub mod fast_memory_quant_vector_provider;
 pub use fast_memory_quant_vector_provider::FastMemoryQuantVectorProviderAsync;
 
 pub(crate) mod postprocess;
-pub use postprocess::RemoveDeletedIdsAndCopy;
 
 // The default `inmem` data provider for the async index.
 pub mod inmem;
