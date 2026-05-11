@@ -9,30 +9,37 @@ use std::sync::Arc;
 
 use bf_tree::{BfTree, Config};
 use bytemuck::bytes_of;
-use diskann::{error::IntoANNResult, utils::VectorRepr, ANNError, ANNErrorKind, ANNResult};
+use diskann::{error::IntoANNResult, utils::VectorRepr, ANNError, ANNResult};
 use diskann_quantization::{
     alloc::{GlobalAllocator, Poly, ScopedAllocator},
-    spherical::iface::{DistanceComputer, OpaqueMut, Quantizer, QueryLayout},
+    spherical::iface::{DistanceComputer, Opaque, OpaqueMut, Quantizer, QueryComputer, QueryLayout},
 };
-use diskann_vector::distance::Metric;
-use thiserror::Error;
+use diskann_vector::{distance::Metric, PreprocessedDistanceFunction};
 
-use super::hybrid_computer::QuantQueryComputer;
 use super::ConfigError;
 use diskann_providers::model::graph::provider::async_::common::TestCallCount;
+
+pub struct QuantQueryComputer(pub QueryComputer<GlobalAllocator>);
+
+impl PreprocessedDistanceFunction<&[u8], f32> for QuantQueryComputer {
+    fn evaluate_similarity(&self, x: &[u8]) -> f32 {
+        self.0
+            .evaluate_similarity(Opaque::new(x))
+            .expect("spherical query distance failed")
+    }
+}
 
 pub struct QuantVectorProvider {
     quant_vector_index: BfTree,
     max_vectors: usize,
     num_start_points: usize,
     pub quantizer: Arc<Poly<dyn Quantizer>>,
-    metric: Metric,
     pub(super) num_get_calls: TestCallCount,
 }
 
 impl QuantVectorProvider {
     pub fn new_with_config(
-        dist_metric: Metric,
+        _dist_metric: Metric,
         max_vectors: usize,
         num_start_points: usize,
         quantizer: Poly<dyn Quantizer>,
@@ -45,14 +52,8 @@ impl QuantVectorProvider {
             num_start_points,
             quant_vector_index,
             quantizer: Arc::new(quantizer),
-            metric: dist_metric,
             num_get_calls: TestCallCount::default(),
         })
-    }
-
-    /// Return the metric associated with this provider
-    pub(crate) fn metric(&self) -> Metric {
-        self.metric
     }
 
     /// Access the BfTree config
@@ -68,7 +69,7 @@ impl QuantVectorProvider {
     /// Create a new instance from an existing BfTree (for loading from snapshot)
     ///
     pub(crate) fn new_from_bftree(
-        dist_metric: Metric,
+        _dist_metric: Metric,
         max_vectors: usize,
         num_start_points: usize,
         quantizer: Poly<dyn Quantizer>,
@@ -79,7 +80,6 @@ impl QuantVectorProvider {
             num_start_points,
             quant_vector_index,
             quantizer: Arc::new(quantizer),
-            metric: dist_metric,
             num_get_calls: TestCallCount::default(),
         }
     }
@@ -121,7 +121,11 @@ impl QuantVectorProvider {
             .map_err(|e| ANNError::log_sq_error(e))
     }
 
+    #[cfg(test)]
     pub(crate) fn get_vector_into(&self, i: usize, buffer: &mut [u8]) -> ANNResult<()> {
+        use diskann::ANNErrorKind;
+        use thiserror::Error;
+
         let expected = buffer.len();
         if buffer.len() != expected {
             #[derive(Debug, Error)]
@@ -168,6 +172,7 @@ impl QuantVectorProvider {
     }
 
     /// Return the quant vector at index `i`.
+    #[cfg(test)]
     pub(crate) fn get_vector_sync(&self, i: usize) -> ANNResult<Vec<u8>> {
         let mut value = vec![0u8; self.quantizer.bytes()];
         self.get_vector_into(i, &mut value)?;

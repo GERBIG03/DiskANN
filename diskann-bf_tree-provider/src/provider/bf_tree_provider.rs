@@ -26,10 +26,9 @@ use diskann::{
             self, Batch, DefaultPostProcessor, ExpandBeam, InplaceDeleteStrategy, InsertStrategy,
             MultiInsertStrategy, PruneStrategy, SearchExt, SearchStrategy,
         },
-        workingset::{self, map},
-        AdjacencyList, DiskANNIndex, SearchOutputBuffer,
+        workingset::map,
+        AdjacencyList, DiskANNIndex,
     },
-    neighbor::Neighbor,
     provider::{
         Accessor, BuildDistanceComputer, BuildQueryComputer, DataProvider, DefaultContext,
         DelegateNeighbor, Delete, ElementStatus, HasId, NeighborAccessor, NeighborAccessorMut,
@@ -39,18 +38,16 @@ use diskann::{
     ANNError, ANNResult,
 };
 use diskann_utils::{future::AsyncFriendly, views::MatrixView};
-use diskann_vector::{distance::Metric, DistanceFunction};
+use diskann_vector::distance::Metric;
 
 use super::{
-    hybrid_computer::{HybridComputer, QuantQueryComputer},
-    neighbor_provider::NeighborProvider,
     quant_vector_provider::QuantVectorProvider,
+    neighbor_provider::NeighborProvider,
     vector_provider::VectorProvider,
 };
 use diskann::graph::glue::{AsDeletionCheck, RemoveDeletedIdsAndCopy};
 use diskann_providers::model::graph::provider::async_::{
-    common::{FullPrecision, Hybrid, NoDeletes, NoStore, Panics},
-    distances,
+    common::{FullPrecision, NoDeletes, NoStore, Panics},
 };
 use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, StorageWriteProvider};
 
@@ -92,18 +89,6 @@ use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, Storag
 ///   from the full-precision portion of the index. No quantized vectors are used.
 ///
 ///   During search, start points are filtered from the final results.
-///
-/// * [`Hybrid`]: The strategies implemented by [`Hybrid`] can use a mix of quantized
-///   and full-precision vectors.
-///
-///   - Search: During search, quantized vectors are used with reranking applied to the
-///     results before returning.
-///
-///   - Insertion: Quantized vectors are used during the search phase. During the pruning
-///     phase, a hybrid of quantized and full-precision vectors are used.
-///
-///     The ratio of full-precision and quantized vectors is controlled by the
-///     `max_fp_vecs_per_prune` parameter, which adjusts the implementation of [`Fill`].
 ///
 /// # Examples
 ///
@@ -976,309 +961,6 @@ where
 {
 }
 
-///////////////////
-// QuantAccessor //
-///////////////////
-
-/// An accessor that retrieves the quantized portion of the [`BfTreeProvider`].
-///
-/// This type implements the following traits:
-///
-/// * [`Accessor`] for the `BfTreeProvider`.
-/// * [`BuildQueryComputer`].
-///
-pub struct QuantAccessor<'a, T>
-where
-    T: VectorRepr,
-{
-    provider: &'a BfTreeProvider<T, QuantVectorProvider>,
-    element: Box<[u8]>,
-}
-
-impl<T> HasId for QuantAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    type Id = u32;
-}
-
-impl<T> SearchExt for QuantAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    fn starting_points(&self) -> impl Future<Output = ANNResult<Vec<u32>>> {
-        std::future::ready(self.provider.starting_points())
-    }
-}
-
-impl<'a, T> QuantAccessor<'a, T>
-where
-    T: VectorRepr,
-{
-    pub(crate) fn new(provider: &'a BfTreeProvider<T, QuantVectorProvider>) -> Self {
-        Self {
-            provider,
-            element: (0..provider.quant_vectors.quantizer.bytes())
-                .map(|_| u8::default())
-                .collect(),
-        }
-    }
-}
-
-impl<'a, T> DelegateNeighbor<'a> for QuantAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    type Delegate = &'a NeighborProvider<u32>;
-    fn delegate_neighbor(&'a mut self) -> Self::Delegate {
-        self.provider.neighbors()
-    }
-}
-
-impl<T> Accessor for QuantAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    /// This accessor returns a reference to a local copy of the element.
-    type Element<'a>
-        = &'a [u8]
-    where
-        Self: 'a;
-
-    /// The reference version of `Element` is simply `Element`.
-    type ElementRef<'a> = &'a [u8];
-
-    // ANNError on access failures in bf-tree
-    //
-    type GetError = ANNError;
-
-    /// Return the quantized vector stored at index `i`.
-    ///
-    /// This function always completes synchronously.
-    ///
-    fn get_element(
-        &mut self,
-        id: Self::Id,
-    ) -> impl Future<Output = Result<Self::Element<'_>, Self::GetError>> + Send {
-        let v = self
-            .provider
-            .quant_vectors
-            .get_vector_into(id.into_usize(), &mut self.element)
-            .map(|_: ()| &*self.element);
-
-        std::future::ready(v)
-    }
-
-    /// Perform a bulk operation
-    ///
-    fn on_elements_unordered<Itr, F>(
-        &mut self,
-        itr: Itr,
-        mut f: F,
-    ) -> impl Future<Output = Result<(), Self::GetError>> + Send
-    where
-        Self: Sync,
-        Itr: Iterator<Item = Self::Id> + Send,
-        F: Send + FnMut(Self::ElementRef<'_>, Self::Id),
-    {
-        for i in itr {
-            match self
-                .provider
-                .quant_vectors
-                .get_vector_into(i.into_usize(), &mut self.element)
-            {
-                Ok(()) => f(&self.element, i),
-                Err(e) => {
-                    return std::future::ready(Err(e));
-                }
-            }
-        }
-        std::future::ready(Ok(()))
-    }
-}
-
-impl<T> BuildQueryComputer<&[T]> for QuantAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    type QueryComputerError = ANNError;
-    type QueryComputer = QuantQueryComputer;
-
-    fn build_query_computer(
-        &self,
-        from: &[T],
-    ) -> Result<Self::QueryComputer, Self::QueryComputerError> {
-        self.provider.quant_vectors.query_computer(from)
-    }
-}
-
-impl<T> ExpandBeam<&[T]> for QuantAccessor<'_, T> where T: VectorRepr {}
-
-/////////////////////
-// Hybrid Accessor //
-/////////////////////
-
-/// A hybrid accessor that fetches a mixture of full-precision and quantized vectors during
-/// pruning. This allows the application to trade full-precision fetches for accuracy.
-///
-/// This type implements the following traits:
-///
-/// * [`Accessor`] for the [`BfTreeProvider`].
-/// * [`BuildDistanceComputer`] for computing distances among [`distances::pq::Hybrid`]
-///   element types.
-/// * [`Fill`] for populating a mixture of full-precision and quant vectors.
-///
-pub struct HybridAccessor<'a, T>
-where
-    T: VectorRepr,
-{
-    provider: &'a BfTreeProvider<T, QuantVectorProvider>,
-}
-
-impl<'a, T> HybridAccessor<'a, T>
-where
-    T: VectorRepr,
-{
-    fn new(provider: &'a BfTreeProvider<T, QuantVectorProvider>) -> Self {
-        Self { provider }
-    }
-}
-
-impl<T> HasId for HybridAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    type Id = u32;
-}
-
-impl<'a, T> DelegateNeighbor<'a> for HybridAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    type Delegate = &'a NeighborProvider<u32>;
-    fn delegate_neighbor(&'a mut self) -> Self::Delegate {
-        self.provider.neighbors()
-    }
-}
-
-impl<T> Accessor for HybridAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    /// The [`distances::pq::Hybrid`] is an enum consisting of either a full-precision
-    /// vector or a quantized vector.
-    ///
-    /// This accessor can return either.
-    type Element<'a>
-        = distances::pq::Hybrid<Vec<T>, Vec<u8>>
-    where
-        Self: 'a;
-
-    /// The generalized reference form of `Element`.
-    type ElementRef<'a> = distances::pq::Hybrid<&'a [T], &'a [u8]>;
-
-    // Choose to panic on an out-of-bounds access rather than propagate an error.
-    type GetError = Panics;
-
-    /// The default behavior of `get_element` returns a full-precision vector. The
-    /// implementation of [`Fill`] is how the `max_fp_vecs_per_fill` is used
-    ///
-    fn get_element(
-        &mut self,
-        id: Self::Id,
-    ) -> impl Future<Output = Result<Self::Element<'_>, Self::GetError>> + Send {
-        // SAFETY: We've decided to live with UB that can result from potentially mixing
-        // unsynchronized reads and writes on the underlying memory.
-        #[allow(clippy::expect_used)]
-        std::future::ready(Ok(distances::pq::Hybrid::Full(
-            self.provider
-                .full_vectors
-                .get_vector_sync(id.into_usize())
-                .expect("Full vector provider failed to retrieve element"),
-        )))
-    }
-}
-
-impl<T> BuildDistanceComputer for HybridAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    type DistanceComputerError = ANNError;
-    type DistanceComputer = HybridComputer<T>;
-
-    fn build_distance_computer(
-        &self,
-    ) -> Result<Self::DistanceComputer, Self::DistanceComputerError> {
-        let metric = self.provider.quant_vectors.metric();
-        Ok(HybridComputer::new(
-            self.provider.quant_vectors.distance_computer()?,
-            T::distance(metric, Some(self.provider.full_vectors.dim())),
-            self.provider.quant_vectors.quantizer.clone(),
-        ))
-    }
-}
-
-impl<T> workingset::Fill<distances::pq::HybridMap<T, u8>> for HybridAccessor<'_, T>
-where
-    T: VectorRepr,
-{
-    type Error = ANNError;
-    type View<'a>
-        = distances::pq::View<'a, T, u8>
-    where
-        Self: 'a;
-
-    async fn fill<'a, Itr>(
-        &'a mut self,
-        state: &'a mut distances::pq::HybridMap<T, u8>,
-        itr: Itr,
-    ) -> Result<Self::View<'a>, Self::Error>
-    where
-        Itr: ExactSizeIterator<Item = Self::Id> + Clone + Send + Sync,
-        Self: 'a,
-    {
-        let map = state.get_mut();
-        map.prepare(itr.clone());
-        let threshold = self.provider.max_fp_vecs_per_fill;
-        itr.enumerate().try_for_each(|(i, id)| -> ANNResult<()> {
-            match map.entry(id) {
-                workingset::map::Entry::Seeded(_) => {}
-                workingset::map::Entry::Occupied(occupied) => {
-                    if i < threshold && !occupied.get().is_full() {
-                        *occupied.into_mut() = distances::pq::Hybrid::Full(
-                            self.provider
-                                .full_vectors
-                                .get_vector_sync(id.into_usize())?,
-                        );
-                    }
-                }
-                workingset::map::Entry::Vacant(vacant) => {
-                    let element = if i < threshold {
-                        let vec = self
-                            .provider
-                            .full_vectors
-                            .get_vector_sync(id.into_usize())?;
-
-                        distances::pq::Hybrid::Full(vec)
-                    } else {
-                        let vec = self
-                            .provider
-                            .quant_vectors
-                            .get_vector_sync(id.into_usize())?;
-
-                        distances::pq::Hybrid::Quant(vec)
-                    };
-
-                    vacant.insert(element);
-                }
-            }
-            Ok(())
-        })?;
-
-        Ok(map.view())
-    }
-}
-
 ////////////////
 // Strategies //
 ////////////////
@@ -1312,77 +994,6 @@ where
     default_post_processor!(glue::Pipeline<glue::FilterStartPoints, RemoveDeletedIdsAndCopy>);
 }
 
-/// An [`glue::SearchPostProcess`] implementation that reranks PQ vectors.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Rerank;
-
-impl<'a, T> glue::SearchPostProcess<QuantAccessor<'a, T>, &[T]> for Rerank
-where
-    T: VectorRepr,
-{
-    type Error = Panics;
-
-    fn post_process<I, B>(
-        &self,
-        accessor: &mut QuantAccessor<'a, T>,
-        query: &[T],
-        _computer: &QuantQueryComputer,
-        candidates: I,
-        output: &mut B,
-    ) -> impl Future<Output = Result<usize, Self::Error>> + Send
-    where
-        I: Iterator<Item = Neighbor<u32>>,
-        B: SearchOutputBuffer<u32> + ?Sized,
-    {
-        let provider = &accessor.provider;
-        let f = T::distance(provider.metric, Some(provider.full_vectors.dim()));
-
-        // Filter before computing the full precision distances.
-        let mut reranked: Vec<(u32, f32)> = candidates
-            .map(|n| {
-                let vec = provider
-                    .full_vectors
-                    .get_vector_sync(n.id.into_usize())
-                    .expect("Full vector provider failed to retrieve element");
-                (n.id, f.evaluate_similarity(query, &vec))
-            })
-            .collect();
-
-        // Sort the full precision distances.
-        reranked
-            .sort_unstable_by(|a, b| (a.1).partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        // Store the reranked results.
-        std::future::ready(Ok(output.extend(reranked)))
-    }
-}
-
-/// Perform a search entirely in the quantized space.
-impl<T> SearchStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
-where
-    T: VectorRepr,
-{
-    type QueryComputer = QuantQueryComputer;
-    type SearchAccessor<'a> = QuantAccessor<'a, T>;
-    type SearchAccessorError = Panics;
-
-    fn search_accessor<'a>(
-        &'a self,
-        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
-        _context: &'a DefaultContext,
-    ) -> Result<Self::SearchAccessor<'a>, Self::SearchAccessorError> {
-        Ok(QuantAccessor::new(provider))
-    }
-}
-
-/// Starting points are filtered out of the final results and results are reranked using
-/// the full-precision data.
-impl<T> DefaultPostProcessor<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
-where
-    T: VectorRepr,
-{
-    default_post_processor!(glue::Pipeline<glue::FilterStartPoints, Rerank>);
-}
-
 // Pruning
 impl<T, Q> PruneStrategy<BfTreeProvider<T, Q>> for FullPrecision
 where
@@ -1407,42 +1018,10 @@ where
     }
 }
 
-impl<T> PruneStrategy<BfTreeProvider<T, QuantVectorProvider>> for Hybrid
-where
-    T: VectorRepr,
-{
-    type WorkingSet = distances::pq::HybridMap<T, u8>;
-    type DistanceComputer<'a> = HybridComputer<T>;
-    type PruneAccessor<'a> = HybridAccessor<'a, T>;
-    type PruneAccessorError = diskann::error::Infallible;
-
-    fn prune_accessor<'a>(
-        &'a self,
-        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
-        _context: &'a DefaultContext,
-    ) -> Result<Self::PruneAccessor<'a>, Self::PruneAccessorError> {
-        Ok(HybridAccessor::new(provider))
-    }
-
-    fn create_working_set(&self, capacity: usize) -> Self::WorkingSet {
-        distances::pq::HybridMap::with_capacity(capacity)
-    }
-}
-
 impl<T, Q> InsertStrategy<BfTreeProvider<T, Q>, &[T]> for FullPrecision
 where
     T: VectorRepr,
     Q: AsyncFriendly,
-{
-    type PruneStrategy = Self;
-    fn prune_strategy(&self) -> Self::PruneStrategy {
-        *self
-    }
-}
-
-impl<T> InsertStrategy<BfTreeProvider<T, QuantVectorProvider>, &[T]> for Hybrid
-where
-    T: VectorRepr,
 {
     type PruneStrategy = Self;
     fn prune_strategy(&self) -> Self::PruneStrategy {
@@ -1478,35 +1057,6 @@ where
         let overlay = map::Overlay::from_batch(batch.clone(), ids);
         let builder = map::Builder::new(map::Capacity::Default).with_overlay(overlay);
         std::future::ready(Ok(builder))
-    }
-}
-
-impl<T, B> MultiInsertStrategy<BfTreeProvider<T, QuantVectorProvider>, B> for Hybrid
-where
-    T: VectorRepr,
-    B: for<'a> Batch<Element<'a> = &'a [T]> + Debug,
-{
-    type Seed = distances::pq::Overlay<T, u8>;
-    type WorkingSet = distances::pq::HybridMap<T, u8>;
-    type FinishError = diskann::error::Infallible;
-    type InsertStrategy = Self;
-
-    fn insert_strategy(&self) -> Self::InsertStrategy {
-        *self
-    }
-
-    fn finish<Itr>(
-        &self,
-        _provider: &BfTreeProvider<T, QuantVectorProvider>,
-        _ctx: &DefaultContext,
-        batch: &std::sync::Arc<B>,
-        ids: Itr,
-    ) -> impl std::future::Future<Output = Result<Self::Seed, Self::FinishError>> + Send
-    where
-        Itr: ExactSizeIterator<Item = u32> + Send,
-    {
-        let overlay = Self::Seed::from_batch(batch.clone(), ids);
-        std::future::ready(Ok(overlay))
     }
 }
 
@@ -1551,45 +1101,6 @@ where
     async fn get_delete_element<'a>(
         &'a self,
         provider: &'a BfTreeProvider<T, Q>,
-        _context: &'a DefaultContext,
-        id: u32,
-    ) -> Result<Self::DeleteElementGuard, Self::DeleteElementError> {
-        #[allow(clippy::expect_used)]
-        let elt = provider
-            .full_vectors
-            .get_vector_sync(id.into_usize())
-            .expect("Failed to get delete element")
-            .into();
-        Ok(elt)
-    }
-}
-
-impl<T> InplaceDeleteStrategy<BfTreeProvider<T, QuantVectorProvider>> for Hybrid
-where
-    T: VectorRepr,
-{
-    type DeleteElementError = Panics;
-    type DeleteElement<'a> = &'a [T];
-    type DeleteElementGuard = Box<[T]>;
-    type PruneStrategy = Self;
-    type DeleteSearchAccessor<'a> = QuantAccessor<'a, T>;
-    type SearchPostProcessor = Rerank;
-    type SearchStrategy = Self;
-    fn search_strategy(&self) -> Self::SearchStrategy {
-        *self
-    }
-
-    fn prune_strategy(&self) -> Self::PruneStrategy {
-        *self
-    }
-
-    fn search_post_processor(&self) -> Self::SearchPostProcessor {
-        Rerank
-    }
-
-    async fn get_delete_element<'a>(
-        &'a self,
-        provider: &'a BfTreeProvider<T, QuantVectorProvider>,
         _context: &'a DefaultContext,
         id: u32,
     ) -> Result<Self::DeleteElementGuard, Self::DeleteElementError> {

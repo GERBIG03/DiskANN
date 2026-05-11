@@ -4,7 +4,6 @@
  */
 
 mod bf_tree_provider;
-mod hybrid_computer;
 mod neighbor_provider;
 mod quant_vector_provider;
 mod vector_provider;
@@ -12,7 +11,7 @@ mod vector_provider;
 // Accessors
 pub use bf_tree_provider::{
     AsVectorDtype, BfTreePaths, BfTreeProvider, BfTreeProviderParameters, CreateQuantProvider,
-    FullAccessor, GraphParams, Hidden, Index, QuantAccessor, QuantIndex, StartPoint, VectorDtype,
+    FullAccessor, GraphParams, Hidden, Index, QuantIndex, StartPoint, VectorDtype,
 };
 
 pub use bf_tree::Config;
