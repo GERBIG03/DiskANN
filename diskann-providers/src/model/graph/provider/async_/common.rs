@@ -350,7 +350,7 @@ impl<T> SetElementHelper<T> for NoStore {
 #[derive(Debug, Clone, Copy)]
 pub struct NoDeletes;
 
-impl diskann::graph::glue::DeletionCheck for NoDeletes {
+impl super::postprocess::DeletionCheck for NoDeletes {
     /// Always mark IDs as not deleted.
     ///
     /// We rely on constant propagation and dead-code elimination to optimize call-sites

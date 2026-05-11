@@ -5,7 +5,6 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use diskann::graph::glue;
 use diskann::utils::IntoUsize;
 
 pub struct TableDeleteProviderAsync {
@@ -88,7 +87,7 @@ impl TableDeleteProviderAsync {
     }
 }
 
-impl glue::DeletionCheck for TableDeleteProviderAsync {
+impl super::postprocess::DeletionCheck for TableDeleteProviderAsync {
     fn deletion_check(&self, id: u32) -> bool {
         self.is_deleted(id.into_usize())
     }

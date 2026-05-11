@@ -36,7 +36,9 @@ use crate::model::graph::provider::async_::{
     },
     inmem::{DefaultProvider, PassThrough},
 };
-use diskann::graph::glue::{AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy};
+use crate::model::graph::provider::async_::postprocess::{
+    AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy,
+};
 
 /// A type alias for the DefaultProvider with full-precision as the primary vector store.
 pub type FullPrecisionProvider<T, Q = NoStore, D = NoDeletes, Ctx = DefaultContext> =

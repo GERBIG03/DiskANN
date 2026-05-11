@@ -40,7 +40,9 @@ use crate::model::{
     },
     pq::{self, FixedChunkPQTable},
 };
-use diskann::graph::glue::{AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy};
+use crate::model::graph::provider::async_::postprocess::{
+    AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy,
+};
 
 /// The default quant provider.
 pub type DefaultQuant = FastMemoryQuantVectorProviderAsync;

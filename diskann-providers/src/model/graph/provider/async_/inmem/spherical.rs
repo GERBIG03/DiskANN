@@ -46,7 +46,9 @@ use crate::{
     },
     utils::{Bridge, BridgeErr},
 };
-use diskann::graph::glue::{AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy};
+use crate::model::graph::provider::async_::postprocess::{
+    AsDeletionCheck, DeletionCheck, RemoveDeletedIdsAndCopy,
+};
 
 /////////////////////
 // Error Promotion //
