@@ -23,7 +23,7 @@ members = [
     "diskann-benchmark-simd",
     "diskann-benchmark",
     "diskann-tools",
-    "vectorset", "diskann-bf_tree-provider",
+    "vectorset", "diskann-bf_tree",
 ]
 
 default-members = [

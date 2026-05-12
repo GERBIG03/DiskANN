@@ -68,7 +68,7 @@ use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, Storag
 /// * `Q`: The full type of the quant vector store. This is not constrained by a trait and
 ///   rather relies on implementation for several concrete types, including:
 ///
-///   - [`BfTreeQuantVectorProviderAsync`]: A Bf-Tree based PQ-based quantized vector store.
+///   - [`BfTreeQuantVectorProviderAsync`]: A Bf-Tree based spherical quantized vector store.
 ///   - [`NoStore`]: Disable quantization altogether. Note that this disables all
 ///     methods reached through quantization based [`Accessor`]s at compile-time.
 ///
@@ -86,10 +86,18 @@ use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, Storag
 ///
 /// # Indexing Strategies
 ///
-/// * [`FullPrecision`]: The strategies implemented by [`FullPrecision`] only retrieve data
-///   from the full-precision portion of the index. No quantized vectors are used.
+/// * [`FullPrecision`]: Only retrieves data from the full-precision portion of the index.
+///   No quantized vectors are used. During search, start points are filtered from the
+///   final results.
 ///
-///   During search, start points are filtered from the final results.
+/// * [`Quantized`]: Performs all operations (search, pruning, insert) entirely in the
+///   quantized space using spherical distance functions. Post-processing copies candidate
+///   IDs forward without reranking. Fastest option — full-precision vectors are not
+///   touched at query time.
+///
+/// * [`Hybrid`]: Searches and prunes in the quantized space (same as [`Quantized`]), but
+///   reranks the final search candidates using full-precision distances. This improves
+///   recall at the cost of fetching full-precision vectors for the result set.
 ///
 /// # Examples
 ///
@@ -101,7 +109,7 @@ use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, Storag
 /// This example demonstrates how to create a `BfTreeProvider` that only supports
 /// full-precision vectors.
 /// ```
-/// use diskann_bf_tree_provider::provider::{
+/// use diskann_bf_tree::provider::{
 ///     BfTreeProvider, BfTreeProviderParameters
 /// };
 /// use diskann_providers::model::graph::provider::async_::common::NoStore;
@@ -141,7 +149,7 @@ use diskann_providers::storage::{LoadWith, SaveWith, StorageReadProvider, Storag
 ///     spherical::{iface, SphericalQuantizer, SupportedMetric, PreScale},
 /// };
 /// use diskann_utils::views::{Init, Matrix};
-/// use diskann_bf_tree_provider::provider::{
+/// use diskann_bf_tree::provider::{
 ///     BfTreeProvider, BfTreeProviderParameters
 /// };
 /// use diskann_vector::distance::Metric;
@@ -920,6 +928,32 @@ where
 
         std::future::ready(Ok(&*self.element))
     }
+
+    /// Perform a bulk operation, silently skipping entries that cannot be read
+    /// (e.g., hard-deleted vectors whose graph edges have not yet been cleaned up).
+    ///
+    fn on_elements_unordered<Itr, F>(
+        &mut self,
+        itr: Itr,
+        mut f: F,
+    ) -> impl Future<Output = Result<(), Self::GetError>> + Send
+    where
+        Self: Sync,
+        Itr: Iterator<Item = Self::Id> + Send,
+        F: Send + FnMut(Self::ElementRef<'_>, Self::Id),
+    {
+        for i in itr {
+            if self
+                .provider
+                .full_vectors
+                .get_vector_into(i.into_usize(), &mut self.element)
+                .is_ok()
+            {
+                f(&self.element, i);
+            }
+        }
+        std::future::ready(Ok(()))
+    }
 }
 
 impl<T, Q> BuildDistanceComputer for FullAccessor<'_, T, Q>
@@ -1055,7 +1089,8 @@ where
         std::future::ready(v)
     }
 
-    /// Perform a bulk operation
+    /// Perform a bulk operation, silently skipping entries that cannot be read
+    /// (e.g., hard-deleted vectors whose graph edges have not yet been cleaned up).
     ///
     fn on_elements_unordered<Itr, F>(
         &mut self,
@@ -1068,15 +1103,13 @@ where
         F: Send + FnMut(Self::ElementRef<'_>, Self::Id),
     {
         for i in itr {
-            match self
+            if self
                 .provider
                 .quant_vectors
                 .get_vector_into(i.into_usize(), &mut self.element)
+                .is_ok()
             {
-                Ok(()) => f(Opaque::new(&self.element), i),
-                Err(e) => {
-                    return std::future::ready(Err(e));
-                }
+                f(Opaque::new(&self.element), i);
             }
         }
         std::future::ready(Ok(()))
@@ -1149,6 +1182,12 @@ where
 }
 
 /// An owned quantized vector that reborrows to [`Opaque`].
+///
+/// Unlike inmem providers (which hand back zero-copy references into a contiguous backing
+/// array), bf_tree copies vector data out of the tree on every access. The
+/// [`workingset::View`] trait requires `get` to return something that implements
+/// `Reborrow<'short, Target = Opaque<'short>>`, so we need an owned type that bridges
+/// bf_tree's copy-out model with the working set's reborrow expectation.
 pub struct OwnedOpaque(Vec<u8>);
 
 impl<'short> diskann_utils::Reborrow<'short> for OwnedOpaque {
@@ -2126,6 +2165,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diskann::{
+        graph::{self, search::Knn},
+        neighbor::BackInserter,
+    };
     use diskann_providers::storage::FileStorageProvider;
     use diskann_quantization::{
         algorithms::TransformKind,
@@ -2163,6 +2206,374 @@ mod tests {
         let imp = iface::Impl::<1>::new(quantizer).unwrap();
         let poly = Poly::new(imp, GlobalAllocator).unwrap();
         poly!(iface::Quantizer, poly)
+    }
+
+    fn create_quant_index() -> Arc<DiskANNIndex<BfTreeProvider<f32, QuantVectorProvider>>> {
+        let start_point = Matrix::new(Init(|| 0.0f32), 1, 5);
+        let dim = 5;
+        let max_degree = 8;
+        let metric = Metric::L2;
+
+        let provider = BfTreeProvider::new(
+            BfTreeProviderParameters {
+                max_points: 20,
+                num_start_points: NonZeroUsize::new(1).unwrap(),
+                dim,
+                metric,
+                max_fp_vecs_per_fill: None,
+                max_degree,
+                vector_provider_config: Config::default(),
+                quant_vector_provider_config: Config::default(),
+                neighbor_list_provider_config: Config::default(),
+                graph_params: None,
+            },
+            start_point.as_view(),
+            create_test_quantizer(5),
+        )
+        .unwrap();
+
+        let index_config = graph::config::Builder::new_with(
+            4,
+            graph::config::MaxDegree::new(max_degree as usize),
+            10,
+            metric.into(),
+            |_| {},
+        )
+        .build()
+        .unwrap();
+
+        Arc::new(DiskANNIndex::new(index_config, provider, None))
+    }
+
+    #[tokio::test]
+    async fn test_quantized_index_search() {
+        let index = create_quant_index();
+        let ctx = &DefaultContext;
+
+        for i in 0..15 {
+            let point = vec![i as f32; 5];
+            index
+                .insert(Quantized, ctx, &i, point.as_slice())
+                .await
+                .unwrap();
+        }
+
+        let query = vec![3.0; 5];
+        let params = Knn::new(5, 10, None).unwrap();
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); 5];
+        let res = index
+            .search(
+                params,
+                &Quantized,
+                &DefaultContext,
+                query.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.result_count, 5,
+            "there are 15 points and we're asking for 5, we expect 5"
+        );
+        assert_eq!(neighbors[0].id, 3);
+    }
+
+    #[tokio::test]
+    async fn test_quantized_index_multi_insert_search() {
+        let index = create_quant_index();
+        let ctx = &DefaultContext;
+
+        let mut counter = 0.0f32;
+        let data = Matrix::new(
+            Init(move || {
+                counter += 1.0;
+                counter
+            }),
+            15,
+            5,
+        );
+        let ids: Arc<[u32]> = (0u32..15).collect::<Vec<_>>().into();
+        let batch: Arc<Matrix<f32>> = Arc::new(data);
+        index
+            .multi_insert::<Quantized, Matrix<f32>>(Quantized, ctx, batch, ids)
+            .await
+            .unwrap();
+
+        let query = vec![3.0; 5];
+        let params = Knn::new(5, 10, None).unwrap();
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); 5];
+        let res = index
+            .search(
+                params,
+                &Quantized,
+                &DefaultContext,
+                query.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.result_count, 5,
+            "there are 15 points and we're asking for 5, we expect 5"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quantized_delete_and_search() {
+        let index = create_quant_index();
+        let ctx = &DefaultContext;
+
+        for i in 0..15 {
+            let point = vec![i as f32; 5];
+            index
+                .insert(Quantized, ctx, &i, point.as_slice())
+                .await
+                .unwrap();
+        }
+
+        index
+            .inplace_delete(Quantized, ctx, &2u32, 2, graph::InplaceDeleteMethod::OneHop)
+            .await
+            .unwrap();
+        index
+            .inplace_delete(Quantized, ctx, &4u32, 2, graph::InplaceDeleteMethod::OneHop)
+            .await
+            .unwrap();
+
+        let query = vec![3.0; 5];
+        let params = Knn::new(5, 10, None).unwrap();
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); 5];
+        let res = index
+            .search(
+                params,
+                &Quantized,
+                &DefaultContext,
+                query.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.result_count, 5);
+        let neighbor_ids: Vec<u32> = neighbors.iter().map(|n| n.id).collect();
+        assert!(!neighbor_ids.contains(&2u32));
+        assert!(!neighbor_ids.contains(&4u32));
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_index_search() {
+        let index = create_quant_index();
+        let ctx = &DefaultContext;
+
+        let strategy = Hybrid {
+            max_fp_vecs_per_prune: None,
+        };
+        for i in 0..15 {
+            let point = vec![i as f32; 5];
+            index
+                .insert(strategy, ctx, &i, point.as_slice())
+                .await
+                .unwrap();
+        }
+
+        let query = vec![3.0; 5];
+        let params = Knn::new(5, 10, None).unwrap();
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); 5];
+
+        let res = index
+            .search(
+                params,
+                &strategy,
+                &DefaultContext,
+                query.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.result_count, 5,
+            "there are 15 points and we're asking for 5, we expect 5"
+        );
+        assert_eq!(neighbors[0].id, 3);
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_delete_and_search() {
+        let index = create_quant_index();
+        let ctx = &DefaultContext;
+        let strategy = Hybrid {
+            max_fp_vecs_per_prune: None,
+        };
+
+        for i in 0..15 {
+            let point = vec![i as f32; 5];
+            index
+                .insert(strategy, ctx, &i, point.as_slice())
+                .await
+                .unwrap();
+        }
+
+        index
+            .inplace_delete(strategy, ctx, &2u32, 2, graph::InplaceDeleteMethod::OneHop)
+            .await
+            .unwrap();
+        index
+            .inplace_delete(strategy, ctx, &4u32, 2, graph::InplaceDeleteMethod::OneHop)
+            .await
+            .unwrap();
+
+        let query = vec![3.0; 5];
+        let params = Knn::new(5, 10, None).unwrap();
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); 5];
+        let res = index
+            .search(
+                params,
+                &strategy,
+                &DefaultContext,
+                query.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.result_count, 5);
+        let neighbor_ids: Vec<u32> = neighbors.iter().map(|n| n.id).collect();
+        assert!(!neighbor_ids.contains(&2u32));
+        assert!(!neighbor_ids.contains(&4u32));
+    }
+
+    fn create_full_precision_index() -> Arc<DiskANNIndex<BfTreeProvider<f32, NoStore>>> {
+        let start_point = Matrix::new(Init(|| 0.0f32), 1, 5);
+        let max_degree = 8;
+        let metric = Metric::L2;
+
+        let provider = BfTreeProvider::new(
+            BfTreeProviderParameters {
+                max_points: 20,
+                num_start_points: NonZeroUsize::new(1).unwrap(),
+                dim: 5,
+                metric,
+                max_fp_vecs_per_fill: None,
+                max_degree,
+                vector_provider_config: Config::default(),
+                quant_vector_provider_config: Config::default(),
+                neighbor_list_provider_config: Config::default(),
+                graph_params: None,
+            },
+            start_point.as_view(),
+            NoStore,
+        )
+        .unwrap();
+
+        let index_config = graph::config::Builder::new_with(
+            4,
+            graph::config::MaxDegree::new(max_degree as usize),
+            10,
+            metric.into(),
+            |_| {},
+        )
+        .build()
+        .unwrap();
+
+        Arc::new(DiskANNIndex::new(index_config, provider, None))
+    }
+
+    #[tokio::test]
+    async fn test_full_precision_index_search() {
+        let index = create_full_precision_index();
+        let ctx = &DefaultContext;
+
+        for i in 0u32..15 {
+            let point = vec![i as f32; 5];
+            index
+                .insert(FullPrecision, ctx, &i, point.as_slice())
+                .await
+                .unwrap();
+        }
+
+        let query = vec![3.0; 5];
+        let params = Knn::new(5, 10, None).unwrap();
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); 5];
+        let res = index
+            .search(
+                params,
+                &FullPrecision,
+                &DefaultContext,
+                query.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.result_count, 5,
+            "there are 15 points and we're asking for 5, we expect 5"
+        );
+        assert_eq!(neighbors[0].id, 3);
+    }
+
+    #[tokio::test]
+    async fn test_full_precision_delete_and_search() {
+        let index = create_full_precision_index();
+        let ctx = &DefaultContext;
+
+        for i in 0u32..15 {
+            let point = vec![i as f32; 5];
+            index
+                .insert(FullPrecision, ctx, &i, point.as_slice())
+                .await
+                .unwrap();
+        }
+
+        index
+            .inplace_delete(
+                FullPrecision,
+                ctx,
+                &2u32,
+                2,
+                graph::InplaceDeleteMethod::OneHop,
+            )
+            .await
+            .unwrap();
+        index
+            .inplace_delete(
+                FullPrecision,
+                ctx,
+                &4u32,
+                2,
+                graph::InplaceDeleteMethod::OneHop,
+            )
+            .await
+            .unwrap();
+
+        let query = vec![3.0; 5];
+        let params = Knn::new(5, 10, None).unwrap();
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); 5];
+        let res = index
+            .search(
+                params,
+                &FullPrecision,
+                &DefaultContext,
+                query.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.result_count, 5);
+        let neighbor_ids: Vec<u32> = neighbors.iter().map(|n| n.id).collect();
+        assert!(!neighbor_ids.contains(&2u32));
+        assert!(!neighbor_ids.contains(&4u32));
     }
 
     #[tokio::test]

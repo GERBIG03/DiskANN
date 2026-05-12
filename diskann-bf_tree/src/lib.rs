@@ -10,5 +10,3 @@
 //! transparently spill to disk for datasets larger than available memory.
 
 pub mod provider;
-
-pub mod caching;
