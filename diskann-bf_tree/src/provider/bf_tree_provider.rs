@@ -904,9 +904,9 @@ where
     /// The reference version of `Element` is the same as `Element`.
     type ElementRef<'a> = &'a [T];
 
-    // Choose to panic on an out-of-bounds access rather than propagate an error.
+    // Hard-deleted entries may be encountered via stale graph edges.
     //
-    type GetError = Panics;
+    type GetError = ANNError;
 
     /// Return the full-precision vector stored at index `i`.
     ///
@@ -917,16 +917,13 @@ where
         &mut self,
         id: Self::Id,
     ) -> impl Future<Output = Result<Self::Element<'_>, Self::GetError>> + Send {
-        // SAFETY: We've decided to live with UB (undefined behavior) that can result from
-        // potentially mixing unsynchronized reads and writes on the underlying memory
-        //
-        #[allow(clippy::expect_used)]
-        self.provider
+        let v = self
+            .provider
             .full_vectors
             .get_vector_into(id.into_usize(), &mut self.element)
-            .expect("Full vector provider failed to retrieve element");
+            .map(|_: ()| &*self.element);
 
-        std::future::ready(Ok(&*self.element))
+        std::future::ready(v)
     }
 
     /// Perform a bulk operation, silently skipping entries that cannot be read
@@ -1323,7 +1320,7 @@ where
     T: VectorRepr,
     Q: AsyncFriendly,
 {
-    type DeleteElementError = Panics;
+    type DeleteElementError = ANNError;
     type DeleteElement<'a> = &'a [T];
     type DeleteElementGuard = Box<[T]>;
     type PruneStrategy = Self;
@@ -1348,11 +1345,9 @@ where
         _context: &'a DefaultContext,
         id: u32,
     ) -> Result<Self::DeleteElementGuard, Self::DeleteElementError> {
-        #[allow(clippy::expect_used)]
         let elt = provider
             .full_vectors
-            .get_vector_sync(id.into_usize())
-            .expect("Failed to get delete element")
+            .get_vector_sync(id.into_usize())?
             .into();
         Ok(elt)
     }
