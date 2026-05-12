@@ -1526,13 +1526,12 @@ where
         let f = T::distance(provider.metric, Some(provider.full_vectors.dim()));
 
         let mut reranked: Vec<(u32, f32)> = candidates
-            .map(|n| {
-                #[allow(clippy::expect_used)]
-                let vec = provider
+            .filter_map(|n| {
+                provider
                     .full_vectors
                     .get_vector_sync(n.id.into_usize())
-                    .expect("Full vector provider failed to retrieve element");
-                (n.id, f.evaluate_similarity(query, &vec))
+                    .ok()
+                    .map(|vec| (n.id, f.evaluate_similarity(query, &vec)))
             })
             .collect();
 
