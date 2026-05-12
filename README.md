@@ -1,6 +1,7 @@
 # DiskANN
 
 [![DiskANN Main](https://github.com/microsoft/DiskANN/actions/workflows/push-test.yml/badge.svg?branch=main)](https://github.com/microsoft/DiskANN/actions/workflows/push-test.yml)
+[![Nightly](https://github.com/microsoft/DiskANN/actions/workflows/nightly.yml/badge.svg?branch=main)](https://github.com/microsoft/DiskANN/actions/workflows/nightly.yml)
 [![PyPI version](https://img.shields.io/pypi/v/diskannpy.svg)](https://pypi.org/project/diskannpy/)
 [![Downloads shield](https://pepy.tech/badge/diskannpy)](https://pepy.tech/project/diskannpy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
