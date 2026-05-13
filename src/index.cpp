@@ -3,6 +3,11 @@
 
 #include <omp.h>
 
+#include <fstream>
+#include <numeric>
+#include <queue>
+#include <random>
+#include <sstream>
 #include <type_traits>
 
 #include "boost/dynamic_bitset.hpp"
@@ -38,7 +43,14 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
       _enable_tags(index_config.enable_tags), _indexingMaxC(DEFAULT_MAXC), _query_scratch(nullptr),
       _pq_dist(index_config.pq_dist_build), _use_opq(index_config.use_opq),
       _filtered_index(index_config.filtered_index), _num_pq_chunks(index_config.num_pq_chunks),
-      _delete_set(new tsl::robin_set<uint32_t>), _conc_consolidate(index_config.concurrent_consolidate)
+      _delete_set(new tsl::robin_set<uint32_t>), _conc_consolidate(index_config.concurrent_consolidate),
+      _force_reordered_start(index_config.force_reordered_start),
+      _short_edge_augmentation_mode(index_config.short_edge_augmentation_mode),
+      _short_edge_n_samples(index_config.short_edge_n_samples),
+      _short_edge_max_candidates(index_config.short_edge_max_candidates),
+      _short_edge_approx_L(index_config.short_edge_approx_L),
+      _short_edge_alpha(index_config.short_edge_alpha),
+      _short_edge_exact_path(index_config.short_edge_exact_path)
 {
     if (_dynamic_index && !_enable_tags)
     {
@@ -991,6 +1003,315 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
 }
 
 template <typename T, typename TagT, typename LabelT>
+float Index<T, TagT, LabelT>::estimate_short_edge_global_radius()
+{
+    const size_t sample_count = std::min(_nd, _short_edge_n_samples == 0 ? _nd : _short_edge_n_samples);
+    if (sample_count == 0)
+    {
+        return 0.0f;
+    }
+
+    std::vector<uint32_t> sample_nodes(_nd);
+    std::iota(sample_nodes.begin(), sample_nodes.end(), 0);
+    if (sample_count < _nd)
+    {
+        std::mt19937 rng(42);
+        std::shuffle(sample_nodes.begin(), sample_nodes.end(), rng);
+        sample_nodes.resize(sample_count);
+    }
+
+    const uint32_t kth = std::max<uint32_t>(1, _indexingRange / 2);
+    double sum = 0.0;
+    size_t valid = 0;
+    for (size_t i = 0; i < sample_count; ++i)
+    {
+        const uint32_t node = sample_nodes[i];
+        const auto &neighbors = _graph_store->get_neighbours(node);
+        if (neighbors.empty())
+        {
+            continue;
+        }
+
+        std::vector<float> dists;
+        dists.reserve(neighbors.size());
+        for (auto nbr : neighbors)
+        {
+            if (nbr == node)
+            {
+                continue;
+            }
+            dists.push_back(_data_store->get_distance(node, nbr));
+        }
+        if (dists.empty())
+        {
+            continue;
+        }
+
+        const size_t idx = std::min<size_t>(dists.size() - 1, kth - 1);
+        std::nth_element(dists.begin(), dists.begin() + idx, dists.end());
+        sum += dists[idx];
+        valid++;
+    }
+
+    return valid == 0 ? 0.0f : static_cast<float>(sum / static_cast<double>(valid));
+}
+
+template <typename T, typename TagT, typename LabelT>
+uint32_t Index<T, TagT, LabelT>::estimate_short_edge_local_density(uint32_t node, float global_radius,
+                                                                   std::vector<uint32_t> &queue,
+                                                                   std::vector<uint32_t> &seen_nodes,
+                                                                   std::vector<uint8_t> &visited, size_t bfs_cap)
+{
+    if (visited.size() < _nd)
+    {
+        visited.resize(_nd, 0);
+    }
+
+    queue.clear();
+    seen_nodes.clear();
+    queue.push_back(node);
+    seen_nodes.push_back(node);
+    visited[node] = 1;
+
+    uint32_t density = 0;
+    size_t head = 0;
+    while (head < queue.size() && seen_nodes.size() <= bfs_cap)
+    {
+        const uint32_t current = queue[head++];
+        const float dist = current == node ? 0.0f : _data_store->get_distance(node, current);
+        if (dist <= global_radius)
+        {
+            density++;
+            for (auto nbr : _graph_store->get_neighbours(current))
+            {
+                if (nbr >= _nd || visited[nbr])
+                {
+                    continue;
+                }
+                visited[nbr] = 1;
+                queue.push_back(nbr);
+                seen_nodes.push_back(nbr);
+                if (seen_nodes.size() > bfs_cap)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    for (auto seen : seen_nodes)
+    {
+        visited[seen] = 0;
+    }
+    return density;
+}
+
+template <typename T, typename TagT, typename LabelT>
+uint32_t Index<T, TagT, LabelT>::compute_short_edge_add_count(uint32_t density, float global_radius) const
+{
+    if (_short_edge_max_candidates == 0)
+    {
+        return 0;
+    }
+    const float score = 1.0f / (1.0f + std::exp(-_short_edge_alpha * (static_cast<float>(density) - global_radius)));
+    return static_cast<uint32_t>(std::floor(static_cast<float>(_short_edge_max_candidates) * score));
+}
+
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::load_exact_short_edge_neighbors(std::vector<std::vector<uint32_t>> &exact_neighbors) const
+{
+    if (_short_edge_exact_path.empty())
+    {
+        throw ANNException("short_edge_exact_path is required for exact short-edge augmentation", -1, __FUNCSIG__,
+                           __FILE__, __LINE__);
+    }
+
+    std::ifstream input(_short_edge_exact_path);
+    if (!input)
+    {
+        throw ANNException("Failed to open exact short-edge file: " + _short_edge_exact_path, -1, __FUNCSIG__, __FILE__,
+                           __LINE__);
+    }
+
+    size_t point_count = 0, k = 0;
+    input >> point_count >> k;
+    if (point_count != _nd)
+    {
+        throw ANNException("Exact short-edge file point count mismatch", -1, __FUNCSIG__, __FILE__, __LINE__);
+    }
+
+    std::string line;
+    std::getline(input, line);
+    exact_neighbors.assign(_nd, {});
+    for (size_t node = 0; node < _nd && std::getline(input, line); ++node)
+    {
+        std::istringstream iss(line);
+        uint32_t id = 0;
+        while (iss >> id)
+        {
+            exact_neighbors[node].push_back(id);
+        }
+    }
+}
+
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::collect_exact_short_edge_candidates(
+    uint32_t node, uint32_t add_count, const std::vector<std::vector<uint32_t>> &exact_neighbors,
+    std::vector<uint32_t> &existing, std::vector<uint32_t> &new_neighbors) const
+{
+    if (node >= exact_neighbors.size())
+    {
+        return;
+    }
+
+    tsl::robin_set<uint32_t> seen(existing.begin(), existing.end());
+    for (auto candidate : exact_neighbors[node])
+    {
+        if (candidate == node || candidate >= _nd || seen.find(candidate) != seen.end())
+        {
+            continue;
+        }
+        new_neighbors.push_back(candidate);
+        seen.insert(candidate);
+        if (new_neighbors.size() >= add_count)
+        {
+            break;
+        }
+    }
+}
+
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::collect_approx_short_edge_candidates(uint32_t node, uint32_t add_count,
+                                                                  InMemQueryScratch<T> *scratch,
+                                                                  std::vector<uint32_t> &existing,
+                                                                  std::vector<uint32_t> &new_neighbors)
+{
+    const std::vector<uint32_t> init_ids = {node};
+    const std::vector<LabelT> unused_filter_label;
+    _data_store->get_vector(node, scratch->aligned_query());
+    iterate_to_fixed_point(scratch, static_cast<uint32_t>(_short_edge_approx_L), init_ids, false, unused_filter_label,
+                           true);
+
+    tsl::robin_set<uint32_t> seen(existing.begin(), existing.end());
+    auto &best = scratch->best_l_nodes();
+    for (size_t i = 0; i < best.size(); ++i)
+    {
+        const uint32_t candidate = best[i].id;
+        if (candidate == node || candidate >= _nd || seen.find(candidate) != seen.end())
+        {
+            continue;
+        }
+        new_neighbors.push_back(candidate);
+        seen.insert(candidate);
+        if (new_neighbors.size() >= add_count)
+        {
+            break;
+        }
+    }
+}
+
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::apply_short_edge_augmentation()
+{
+    if (_short_edge_augmentation_mode == ShortEdgeAugmentationMode::NONE || _short_edge_max_candidates == 0 || _nd == 0)
+    {
+        return;
+    }
+
+    const float global_radius = estimate_short_edge_global_radius();
+    const size_t bfs_cap = 500;
+    std::vector<std::vector<uint32_t>> exact_neighbors;
+    if (_short_edge_augmentation_mode == ShortEdgeAugmentationMode::EXACT)
+    {
+        load_exact_short_edge_neighbors(exact_neighbors);
+    }
+
+    std::vector<uint32_t> add_counts(_nd, 0);
+    std::vector<uint32_t> resulting_degrees(_nd, 0);
+    std::vector<std::vector<uint32_t>> additions(_nd);
+
+#pragma omp parallel for schedule(dynamic)
+    for (int64_t node = 0; node < static_cast<int64_t>(_nd); ++node)
+    {
+        std::vector<uint32_t> queue;
+        std::vector<uint32_t> seen_nodes;
+        std::vector<uint8_t> visited;
+        const uint32_t density =
+            estimate_short_edge_local_density(static_cast<uint32_t>(node), global_radius, queue, seen_nodes, visited,
+                                              bfs_cap);
+        const uint32_t add_count = compute_short_edge_add_count(density, global_radius);
+        add_counts[static_cast<size_t>(node)] = add_count;
+
+        const auto &current_neighbors = _graph_store->get_neighbours(static_cast<uint32_t>(node));
+        resulting_degrees[static_cast<size_t>(node)] = current_neighbors.size();
+        if (add_count == 0)
+        {
+            continue;
+        }
+
+        std::vector<uint32_t> existing(current_neighbors.begin(), current_neighbors.end());
+        auto &new_neighbors = additions[static_cast<size_t>(node)];
+        new_neighbors.reserve(add_count);
+
+        if (_short_edge_augmentation_mode == ShortEdgeAugmentationMode::EXACT)
+        {
+            collect_exact_short_edge_candidates(static_cast<uint32_t>(node), add_count, exact_neighbors, existing,
+                                                new_neighbors);
+        }
+        else
+        {
+            ScratchStoreManager<InMemQueryScratch<T>> manager(_query_scratch);
+            auto scratch = manager.scratch_space();
+            collect_approx_short_edge_candidates(static_cast<uint32_t>(node), add_count, scratch, existing,
+                                                 new_neighbors);
+        }
+
+        resulting_degrees[static_cast<size_t>(node)] += static_cast<uint32_t>(new_neighbors.size());
+    }
+
+#pragma omp parallel for schedule(dynamic)
+    for (int64_t node = 0; node < static_cast<int64_t>(_nd); ++node)
+    {
+        auto &new_neighbors = additions[static_cast<size_t>(node)];
+        if (new_neighbors.empty())
+        {
+            continue;
+        }
+
+        LockGuard guard(_locks[static_cast<uint32_t>(node)]);
+        std::vector<uint32_t> merged = _graph_store->get_neighbours(static_cast<uint32_t>(node));
+        merged.insert(merged.end(), new_neighbors.begin(), new_neighbors.end());
+        _graph_store->set_neighbours(static_cast<uint32_t>(node), merged);
+    }
+
+    uint32_t min_add = std::numeric_limits<uint32_t>::max();
+    uint32_t max_add = 0;
+    uint64_t total_add = 0;
+    size_t min_degree = SIZE_MAX;
+    size_t max_degree = 0;
+    uint64_t total_degree = 0;
+    for (size_t i = 0; i < _nd; ++i)
+    {
+        min_add = std::min(min_add, add_counts[i]);
+        max_add = std::max(max_add, add_counts[i]);
+        total_add += additions[i].size();
+        min_degree = std::min(min_degree, static_cast<size_t>(resulting_degrees[i]));
+        max_degree = std::max(max_degree, static_cast<size_t>(resulting_degrees[i]));
+        total_degree += resulting_degrees[i];
+    }
+    if (min_add == std::numeric_limits<uint32_t>::max())
+    {
+        min_add = 0;
+    }
+
+    diskann::cout << "Short-edge augmentation complete. global_radius=" << global_radius << " add_count[min="
+                  << min_add << ", max=" << max_add << ", avg="
+                  << static_cast<double>(total_add) / static_cast<double>(_nd) << "] degree[min=" << min_degree
+                  << ", max=" << max_degree << ", avg="
+                  << static_cast<double>(total_degree) / static_cast<double>(_nd) << "]" << std::endl;
+}
+
+template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::search_for_point_and_prune(int location, uint32_t Lindex,
                                                         std::vector<uint32_t> &pruned_list,
                                                         InMemQueryScratch<T> *scratch, bool use_filter,
@@ -1305,8 +1626,10 @@ template <typename T, typename TagT, typename LabelT> void Index<T, TagT, LabelT
         visit_order.emplace_back(frozen);
     }
 
-    // if there are frozen points, the first such one is set to be the _start
-    if (_num_frozen_pts > 0)
+    // if there are any frozen points, the first such one is set to be the _start
+    if (_force_reordered_start)
+        _start = 0;
+    else if (_num_frozen_pts > 0)
         _start = (uint32_t)_max_points;
     else
         _start = calculate_entry_point();
@@ -1558,6 +1881,7 @@ void Index<T, TagT, LabelT>::build_with_data_populated(const std::vector<TagT> &
 
     generate_frozen_point();
     link();
+    apply_short_edge_augmentation();
 
     size_t max = 0, min = SIZE_MAX, total = 0, cnt = 0;
     for (size_t i = 0; i < _nd; i++)
@@ -2261,7 +2585,7 @@ template <typename T, typename TagT, typename LabelT> void Index<T, TagT, LabelT
     {
         throw ANNException("ERROR: Can not pick a frozen point since nd=0", -1, __FUNCSIG__, __FILE__, __LINE__);
     }
-    size_t res = calculate_entry_point();
+    size_t res = _force_reordered_start ? 0 : calculate_entry_point();
 
     // REFACTOR PQ: Not sure if we should do this for both stores.
     if (_pq_dist)

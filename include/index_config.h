@@ -15,6 +15,13 @@ enum class GraphStoreStrategy
     MEMORY
 };
 
+enum class ShortEdgeAugmentationMode
+{
+    NONE,
+    EXACT,
+    APPROX
+};
+
 struct IndexConfig
 {
     DataStoreStrategy data_strategy;
@@ -30,10 +37,16 @@ struct IndexConfig
     bool concurrent_consolidate;
     bool use_opq;
     bool filtered_index;
+    bool force_reordered_start;
+    ShortEdgeAugmentationMode short_edge_augmentation_mode;
 
     size_t num_pq_chunks;
     size_t num_frozen_pts;
-
+    size_t short_edge_n_samples;
+    size_t short_edge_max_candidates;
+    size_t short_edge_approx_L;
+    float short_edge_alpha;
+    std::string short_edge_exact_path;
     std::string label_type;
     std::string tag_type;
     std::string data_type;
@@ -47,14 +60,21 @@ struct IndexConfig
     IndexConfig(DataStoreStrategy data_strategy, GraphStoreStrategy graph_strategy, Metric metric, size_t dimension,
                 size_t max_points, size_t num_pq_chunks, size_t num_frozen_points, bool dynamic_index, bool enable_tags,
                 bool pq_dist_build, bool concurrent_consolidate, bool use_opq, bool filtered_index,
-                std::string &data_type, const std::string &tag_type, const std::string &label_type,
+                bool force_reordered_start, ShortEdgeAugmentationMode short_edge_augmentation_mode,
+                size_t short_edge_n_samples, size_t short_edge_max_candidates, size_t short_edge_approx_L,
+                float short_edge_alpha, std::string &short_edge_exact_path, std::string &data_type,
+                const std::string &tag_type, const std::string &label_type,
                 std::shared_ptr<IndexWriteParameters> index_write_params,
                 std::shared_ptr<IndexSearchParams> index_search_params)
         : data_strategy(data_strategy), graph_strategy(graph_strategy), metric(metric), dimension(dimension),
           max_points(max_points), dynamic_index(dynamic_index), enable_tags(enable_tags), pq_dist_build(pq_dist_build),
           concurrent_consolidate(concurrent_consolidate), use_opq(use_opq), filtered_index(filtered_index),
-          num_pq_chunks(num_pq_chunks), num_frozen_pts(num_frozen_points), label_type(label_type), tag_type(tag_type),
-          data_type(data_type), index_write_params(index_write_params), index_search_params(index_search_params)
+          force_reordered_start(force_reordered_start), short_edge_augmentation_mode(short_edge_augmentation_mode),
+          num_pq_chunks(num_pq_chunks), num_frozen_pts(num_frozen_points), short_edge_n_samples(short_edge_n_samples),
+          short_edge_max_candidates(short_edge_max_candidates), short_edge_approx_L(short_edge_approx_L),
+          short_edge_alpha(short_edge_alpha), short_edge_exact_path(short_edge_exact_path), label_type(label_type),
+          tag_type(tag_type), data_type(data_type), index_write_params(index_write_params),
+          index_search_params(index_search_params)
     {
     }
 
@@ -129,6 +149,48 @@ class IndexConfigBuilder
     IndexConfigBuilder &is_filtered(bool is_filtered)
     {
         this->_filtered_index = is_filtered;
+        return *this;
+    }
+
+    IndexConfigBuilder &force_reordered_start(bool force_reordered_start)
+    {
+        this->_force_reordered_start = force_reordered_start;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_short_edge_augmentation_mode(ShortEdgeAugmentationMode mode)
+    {
+        this->_short_edge_augmentation_mode = mode;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_short_edge_n_samples(size_t n_samples)
+    {
+        this->_short_edge_n_samples = n_samples;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_short_edge_max_candidates(size_t max_candidates)
+    {
+        this->_short_edge_max_candidates = max_candidates;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_short_edge_approx_L(size_t approx_L)
+    {
+        this->_short_edge_approx_L = approx_L;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_short_edge_alpha(float alpha)
+    {
+        this->_short_edge_alpha = alpha;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_short_edge_exact_path(const std::string &exact_path)
+    {
+        this->_short_edge_exact_path = exact_path;
         return *this;
     }
 
@@ -221,8 +283,10 @@ class IndexConfigBuilder
 
         return IndexConfig(_data_strategy, _graph_strategy, _metric, _dimension, _max_points, _num_pq_chunks,
                            _num_frozen_pts, _dynamic_index, _enable_tags, _pq_dist_build, _concurrent_consolidate,
-                           _use_opq, _filtered_index, _data_type, _tag_type, _label_type, _index_write_params,
-                           _index_search_params);
+                           _use_opq, _filtered_index, _force_reordered_start, _short_edge_augmentation_mode,
+                           _short_edge_n_samples, _short_edge_max_candidates, _short_edge_approx_L,
+                           _short_edge_alpha, _short_edge_exact_path, _data_type, _tag_type, _label_type,
+                           _index_write_params, _index_search_params);
     }
 
     IndexConfigBuilder(const IndexConfigBuilder &) = delete;
@@ -242,13 +306,20 @@ class IndexConfigBuilder
     bool _concurrent_consolidate = false;
     bool _use_opq = false;
     bool _filtered_index{defaults::HAS_LABELS};
+    bool _force_reordered_start = false;
+    ShortEdgeAugmentationMode _short_edge_augmentation_mode = ShortEdgeAugmentationMode::NONE;
 
     size_t _num_pq_chunks = 0;
     size_t _num_frozen_pts{defaults::NUM_FROZEN_POINTS_STATIC};
+    size_t _short_edge_n_samples = 1024;
+    size_t _short_edge_max_candidates = 0;
+    size_t _short_edge_approx_L = 50;
+    float _short_edge_alpha = 1.0f;
 
     std::string _label_type{"uint32"};
     std::string _tag_type{"uint32"};
     std::string _data_type;
+    std::string _short_edge_exact_path;
 
     std::shared_ptr<IndexWriteParameters> _index_write_params;
     std::shared_ptr<IndexSearchParams> _index_search_params;

@@ -24,10 +24,12 @@ namespace po = boost::program_options;
 
 int main(int argc, char **argv)
 {
-    std::string data_type, dist_fn, data_path, index_path_prefix, label_file, universal_label, label_type;
-    uint32_t num_threads, R, L, Lf, build_PQ_bytes;
-    float alpha;
-    bool use_pq_build, use_opq;
+    std::string data_type, dist_fn, data_path, index_path_prefix, label_file, universal_label, label_type,
+        short_edge_mode, short_edge_exact_path;
+    uint32_t num_threads, R, L, Lf, build_PQ_bytes, short_edge_n_samples, short_edge_max_candidates,
+        short_edge_approx_L;
+    float alpha, short_edge_alpha;
+    bool use_pq_build, use_opq, force_reordered_start;
 
     po::options_description desc{
         program_options_utils::make_program_description("build_memory_index", "Build a memory-based DiskANN index.")};
@@ -61,6 +63,26 @@ int main(int argc, char **argv)
                                        program_options_utils::BUIlD_GRAPH_PQ_BYTES);
         optional_configs.add_options()("use_opq", po::bool_switch()->default_value(false),
                                        program_options_utils::USE_OPQ);
+        optional_configs.add_options()("force_reordered_start", po::bool_switch()->default_value(false),
+                                       "Force the entry point to use the first vector in the input dataset");
+        optional_configs.add_options()("short_edge_mode",
+                                       po::value<std::string>(&short_edge_mode)->default_value("none"),
+                                       "Short-edge augmentation mode: none, exact, approx");
+        optional_configs.add_options()("short_edge_exact_path",
+                                       po::value<std::string>(&short_edge_exact_path)->default_value(""),
+                                       "Path to exact KNN text file for short-edge augmentation");
+        optional_configs.add_options()("short_edge_n_samples",
+                                       po::value<uint32_t>(&short_edge_n_samples)->default_value(1024),
+                                       "Number of sampled nodes for global radius estimation");
+        optional_configs.add_options()("short_edge_max_candidates",
+                                       po::value<uint32_t>(&short_edge_max_candidates)->default_value(0),
+                                       "Upper bound on extra short edges added per node");
+        optional_configs.add_options()("short_edge_approx_L",
+                                       po::value<uint32_t>(&short_edge_approx_L)->default_value(50),
+                                       "Search list size for approximate short-edge augmentation");
+        optional_configs.add_options()("short_edge_alpha",
+                                       po::value<float>(&short_edge_alpha)->default_value(1.0f),
+                                       "Sigmoid sharpness for density-adaptive short-edge augmentation");
         optional_configs.add_options()("label_file", po::value<std::string>(&label_file)->default_value(""),
                                        program_options_utils::LABEL_FILE);
         optional_configs.add_options()("universal_label", po::value<std::string>(&universal_label)->default_value(""),
@@ -84,6 +106,7 @@ int main(int argc, char **argv)
         po::notify(vm);
         use_pq_build = (build_PQ_bytes > 0);
         use_opq = vm["use_opq"].as<bool>();
+        force_reordered_start = vm["force_reordered_start"].as<bool>();
     }
     catch (const std::exception &ex)
     {
@@ -114,6 +137,22 @@ int main(int argc, char **argv)
 
     try
     {
+        diskann::ShortEdgeAugmentationMode short_edge_augmentation_mode =
+            diskann::ShortEdgeAugmentationMode::NONE;
+        if (short_edge_mode == "exact")
+        {
+            short_edge_augmentation_mode = diskann::ShortEdgeAugmentationMode::EXACT;
+        }
+        else if (short_edge_mode == "approx")
+        {
+            short_edge_augmentation_mode = diskann::ShortEdgeAugmentationMode::APPROX;
+        }
+        else if (short_edge_mode != "none")
+        {
+            std::cerr << "Unsupported short_edge_mode: " << short_edge_mode << std::endl;
+            return -1;
+        }
+
         diskann::cout << "Starting index build with R: " << R << "  Lbuild: " << L << "  alpha: " << alpha
                       << "  #threads: " << num_threads << std::endl;
 
@@ -144,6 +183,13 @@ int main(int argc, char **argv)
                           .with_index_write_params(index_build_params)
                           .is_enable_tags(false)
                           .is_use_opq(use_opq)
+                          .force_reordered_start(force_reordered_start)
+                          .with_short_edge_augmentation_mode(short_edge_augmentation_mode)
+                          .with_short_edge_n_samples(short_edge_n_samples)
+                          .with_short_edge_max_candidates(short_edge_max_candidates == 0 ? R : short_edge_max_candidates)
+                          .with_short_edge_approx_L(short_edge_approx_L)
+                          .with_short_edge_alpha(short_edge_alpha)
+                          .with_short_edge_exact_path(short_edge_exact_path)
                           .is_pq_dist_build(use_pq_build)
                           .with_num_pq_chunks(build_PQ_bytes)
                           .build();

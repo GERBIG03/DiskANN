@@ -285,6 +285,18 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
 
     // Acquire exclusive _update_lock before calling
     void link();
+    void apply_short_edge_augmentation();
+    float estimate_short_edge_global_radius();
+    uint32_t estimate_short_edge_local_density(uint32_t node, float global_radius, std::vector<uint32_t> &queue,
+                                               std::vector<uint32_t> &seen_nodes, std::vector<uint8_t> &visited,
+                                               size_t bfs_cap);
+    uint32_t compute_short_edge_add_count(uint32_t density, float global_radius) const;
+    void collect_exact_short_edge_candidates(uint32_t node, uint32_t add_count,
+                                             const std::vector<std::vector<uint32_t>> &exact_neighbors,
+                                             std::vector<uint32_t> &existing, std::vector<uint32_t> &new_neighbors) const;
+    void collect_approx_short_edge_candidates(uint32_t node, uint32_t add_count, InMemQueryScratch<T> *scratch,
+                                              std::vector<uint32_t> &existing, std::vector<uint32_t> &new_neighbors);
+    void load_exact_short_edge_neighbors(std::vector<std::vector<uint32_t>> &exact_neighbors) const;
 
     // Acquire exclusive _tag_lock and _delete_lock before calling
     int reserve_location();
@@ -372,6 +384,13 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     bool _enable_tags = false;
     bool _normalize_vecs = false; // Using normalied L2 for cosine.
     bool _deletes_enabled = false;
+    bool _force_reordered_start = false;
+    ShortEdgeAugmentationMode _short_edge_augmentation_mode = ShortEdgeAugmentationMode::NONE;
+    size_t _short_edge_n_samples = 1024;
+    size_t _short_edge_max_candidates = 0;
+    size_t _short_edge_approx_L = 50;
+    float _short_edge_alpha = 1.0f;
+    std::string _short_edge_exact_path;
 
     // Filter Support
 
