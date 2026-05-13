@@ -21,6 +21,7 @@
 #include "in_mem_data_store.h"
 #include "in_mem_graph_store.h"
 #include "abstract_index.h"
+#include "adaptive_reverse_prune.h"
 
 #include "quantized_distance.h"
 #include "pq_data_store.h"
@@ -286,6 +287,10 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     // Acquire exclusive _update_lock before calling
     void link();
     void apply_short_edge_augmentation();
+    void initialize_adaptive_reverse_pruner();
+    void load_data_vector(uint32_t id, std::vector<T> &buffer) const;
+    float current_adaptive_reverse_avg_out_degree() const;
+    float compute_adaptive_reverse_distance_scale(uint32_t anchor, const std::vector<uint32_t> &neighbors) const;
     float estimate_short_edge_global_radius();
     uint32_t estimate_short_edge_local_density(uint32_t node, float global_radius, std::vector<uint32_t> &queue,
                                                std::vector<uint32_t> &seen_nodes, std::vector<uint8_t> &visited,
@@ -386,6 +391,11 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     bool _deletes_enabled = false;
     bool _force_reordered_start = false;
     ShortEdgeAugmentationMode _short_edge_augmentation_mode = ShortEdgeAugmentationMode::NONE;
+    AdaptiveReversePruneParams _adaptive_reverse_prune_params;
+    std::unique_ptr<AdaptiveReversePruner<T>> _adaptive_reverse_pruner;
+    std::vector<float> _adaptive_reverse_global_centroid;
+    std::atomic<uint64_t> _adaptive_reverse_total_out_edges{0};
+    float _adaptive_reverse_initial_avg_out_degree = 0.0f;
     size_t _short_edge_n_samples = 1024;
     size_t _short_edge_max_candidates = 0;
     size_t _short_edge_approx_L = 50;

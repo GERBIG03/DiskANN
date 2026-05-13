@@ -56,6 +56,14 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 if(NOT PYBIND)
     set(DISKANN_RELEASE_UNUSED_TCMALLOC_MEMORY_AT_CHECKPOINTS ON)
 endif()
+
+option(DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE
+       "Enable adaptive reverse-edge pruning" ON)
+if(DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE)
+    add_compile_definitions(DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE=1)
+else()
+    add_compile_definitions(DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE=0)
+endif()
 # It's necessary to include tcmalloc headers only if calling into MallocExtension interface.
 # For using tcmalloc in DiskANN tools, it's enough to just link with tcmalloc.
 if (DISKANN_RELEASE_UNUSED_TCMALLOC_MEMORY_AT_CHECKPOINTS)

@@ -27,9 +27,11 @@ int main(int argc, char **argv)
     std::string data_type, dist_fn, data_path, index_path_prefix, label_file, universal_label, label_type,
         short_edge_mode, short_edge_exact_path;
     uint32_t num_threads, R, L, Lf, build_PQ_bytes, short_edge_n_samples, short_edge_max_candidates,
-        short_edge_approx_L;
-    float alpha, short_edge_alpha;
-    bool use_pq_build, use_opq, force_reordered_start;
+        short_edge_approx_L, adaptive_reverse_prune_min_neighbors_to_check;
+    float alpha, short_edge_alpha, adaptive_reverse_prune_alpha, adaptive_reverse_prune_k_mad,
+        adaptive_reverse_prune_r_min_ratio;
+    bool use_pq_build, use_opq, force_reordered_start, enable_adaptive_reverse_prune,
+        adaptive_reverse_prune_strict_require_reorder;
 
     po::options_description desc{
         program_options_utils::make_program_description("build_memory_index", "Build a memory-based DiskANN index.")};
@@ -83,6 +85,25 @@ int main(int argc, char **argv)
         optional_configs.add_options()("short_edge_alpha",
                                        po::value<float>(&short_edge_alpha)->default_value(1.0f),
                                        "Sigmoid sharpness for density-adaptive short-edge augmentation");
+        optional_configs.add_options()("enable_adaptive_reverse_prune",
+                                       po::bool_switch()->default_value(false),
+                                       "Enable adaptive pruning for reverse-edge insertion");
+        optional_configs.add_options()("adaptive_reverse_prune_strict_require_reorder",
+                                       po::bool_switch()->default_value(false),
+                                       "Require reordered input and --force_reordered_start when adaptive reverse pruning is enabled");
+        optional_configs.add_options()("adaptive_reverse_prune_alpha",
+                                       po::value<float>(&adaptive_reverse_prune_alpha)->default_value(1.0f),
+                                       "Alpha multiplier in adaptive reverse prune trigger threshold");
+        optional_configs.add_options()("adaptive_reverse_prune_k_mad",
+                                       po::value<float>(&adaptive_reverse_prune_k_mad)->default_value(1.0f),
+                                       "MAD multiplier in adaptive reverse prune cutoff");
+        optional_configs.add_options()("adaptive_reverse_prune_r_min_ratio",
+                                       po::value<float>(&adaptive_reverse_prune_r_min_ratio)->default_value(0.5f),
+                                       "Minimum degree ratio against R before checking reverse-edge pruning");
+        optional_configs.add_options()("adaptive_reverse_prune_min_neighbors_to_check",
+                                       po::value<uint32_t>(&adaptive_reverse_prune_min_neighbors_to_check)
+                                           ->default_value(4),
+                                       "Minimum existing neighbors before checking adaptive reverse pruning");
         optional_configs.add_options()("label_file", po::value<std::string>(&label_file)->default_value(""),
                                        program_options_utils::LABEL_FILE);
         optional_configs.add_options()("universal_label", po::value<std::string>(&universal_label)->default_value(""),
@@ -107,6 +128,9 @@ int main(int argc, char **argv)
         use_pq_build = (build_PQ_bytes > 0);
         use_opq = vm["use_opq"].as<bool>();
         force_reordered_start = vm["force_reordered_start"].as<bool>();
+        enable_adaptive_reverse_prune = vm["enable_adaptive_reverse_prune"].as<bool>();
+        adaptive_reverse_prune_strict_require_reorder =
+            vm["adaptive_reverse_prune_strict_require_reorder"].as<bool>();
     }
     catch (const std::exception &ex)
     {
@@ -171,6 +195,14 @@ int main(int argc, char **argv)
                                  .with_label_file(label_file)
                                  .with_save_path_prefix(index_path_prefix)
                                  .build();
+        diskann::AdaptiveReversePruneParams adaptive_reverse_prune_params;
+        adaptive_reverse_prune_params.enabled = enable_adaptive_reverse_prune;
+        adaptive_reverse_prune_params.strict_require_reorder = adaptive_reverse_prune_strict_require_reorder;
+        adaptive_reverse_prune_params.alpha = adaptive_reverse_prune_alpha;
+        adaptive_reverse_prune_params.k_mad = adaptive_reverse_prune_k_mad;
+        adaptive_reverse_prune_params.r_min_ratio = adaptive_reverse_prune_r_min_ratio;
+        adaptive_reverse_prune_params.min_neighbors_to_check =
+            adaptive_reverse_prune_min_neighbors_to_check;
         auto config = diskann::IndexConfigBuilder()
                           .with_metric(metric)
                           .with_dimension(data_dim)
@@ -184,6 +216,7 @@ int main(int argc, char **argv)
                           .is_enable_tags(false)
                           .is_use_opq(use_opq)
                           .force_reordered_start(force_reordered_start)
+                          .with_adaptive_reverse_prune_params(adaptive_reverse_prune_params)
                           .with_short_edge_augmentation_mode(short_edge_augmentation_mode)
                           .with_short_edge_n_samples(short_edge_n_samples)
                           .with_short_edge_max_candidates(short_edge_max_candidates == 0 ? R : short_edge_max_candidates)

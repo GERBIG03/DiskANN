@@ -32,6 +32,88 @@
 
 namespace diskann
 {
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::load_data_vector(uint32_t id, std::vector<T> &buffer) const
+{
+    if (buffer.size() != _dim)
+    {
+        buffer.resize(_dim);
+    }
+    _data_store->get_vector(id, buffer.data());
+}
+
+template <typename T, typename TagT, typename LabelT>
+float Index<T, TagT, LabelT>::compute_adaptive_reverse_distance_scale(uint32_t anchor,
+                                                                      const std::vector<uint32_t> &neighbors) const
+{
+    if (neighbors.empty())
+    {
+        return 0.0f;
+    }
+
+    std::vector<float> distances;
+    distances.reserve(neighbors.size());
+    for (uint32_t neighbor : neighbors)
+    {
+        distances.push_back(_data_store->get_distance((location_t)anchor, (location_t)neighbor));
+    }
+
+    const size_t mid = distances.size() / 2;
+    std::nth_element(distances.begin(), distances.begin() + mid, distances.end());
+    float median = distances[mid];
+    if (distances.size() % 2 == 0)
+    {
+        std::nth_element(distances.begin(), distances.begin() + mid - 1, distances.end());
+        median = (median + distances[mid - 1]) * 0.5f;
+    }
+    return median;
+}
+
+template <typename T, typename TagT, typename LabelT>
+float Index<T, TagT, LabelT>::current_adaptive_reverse_avg_out_degree() const
+{
+    if (_adaptive_reverse_total_out_edges.load() == 0)
+    {
+        return _adaptive_reverse_initial_avg_out_degree;
+    }
+    return static_cast<float>(_adaptive_reverse_total_out_edges.load()) /
+           static_cast<float>(_nd + _num_frozen_pts);
+}
+
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::initialize_adaptive_reverse_pruner()
+{
+#if DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE
+    if (!_adaptive_reverse_prune_params.enabled)
+    {
+        _adaptive_reverse_pruner.reset();
+        return;
+    }
+
+    _adaptive_reverse_global_centroid.assign(_dim, 0.0f);
+    std::vector<T> buffer(_dim);
+    for (uint32_t i = 0; i < _nd; ++i)
+    {
+        load_data_vector(i, buffer);
+        for (size_t d = 0; d < _dim; ++d)
+        {
+            _adaptive_reverse_global_centroid[d] += static_cast<float>(buffer[d]);
+        }
+    }
+    for (size_t d = 0; d < _dim; ++d)
+    {
+        _adaptive_reverse_global_centroid[d] /= static_cast<float>(_nd);
+    }
+
+    _adaptive_reverse_initial_avg_out_degree = static_cast<float>(_indexingRange);
+    _adaptive_reverse_total_out_edges.store(0);
+    _adaptive_reverse_pruner = std::make_unique<AdaptiveReversePruner<T>>(
+        _adaptive_reverse_prune_params, _adaptive_reverse_global_centroid, _dim, _indexingRange);
+#else
+    _adaptive_reverse_pruner.reset();
+#endif
+}
+
 // Initialize an index with metric m, load the data of type T with filename
 // (bin), and initialize max_points
 template <typename T, typename TagT, typename LabelT>
@@ -46,6 +128,7 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
       _delete_set(new tsl::robin_set<uint32_t>), _conc_consolidate(index_config.concurrent_consolidate),
       _force_reordered_start(index_config.force_reordered_start),
       _short_edge_augmentation_mode(index_config.short_edge_augmentation_mode),
+      _adaptive_reverse_prune_params(index_config.adaptive_reverse_prune_params),
       _short_edge_n_samples(index_config.short_edge_n_samples),
       _short_edge_max_candidates(index_config.short_edge_max_candidates),
       _short_edge_approx_L(index_config.short_edge_approx_L),
@@ -1543,9 +1626,7 @@ void Index<T, TagT, LabelT>::inter_insert(uint32_t n, std::vector<uint32_t> &pru
 
     for (auto des : src_pool)
     {
-        // des.loc is the loc of the neighbors of n
         assert(des < _max_points + _num_frozen_pts);
-        // des_pool contains the neighbors of the neighbors of n
         std::vector<uint32_t> copy_of_neighbors;
         bool prune_needed = false;
         {
@@ -1553,9 +1634,27 @@ void Index<T, TagT, LabelT>::inter_insert(uint32_t n, std::vector<uint32_t> &pru
             auto &des_pool = _graph_store->get_neighbours(des);
             if (std::find(des_pool.begin(), des_pool.end(), n) == des_pool.end())
             {
+#if DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE
+                if (_adaptive_reverse_pruner != nullptr)
+                {
+                    std::vector<T> des_vec(_dim), n_vec(_dim);
+                    load_data_vector(des, des_vec);
+                    load_data_vector(n, n_vec);
+                    const float median_neighbor_distance = compute_adaptive_reverse_distance_scale(des, des_pool);
+                    const bool accept_reverse_edge = _adaptive_reverse_pruner->should_accept(
+                        n_vec.data(), des_vec.data(), des_pool,
+                        [this](uint32_t id, T *buffer) {
+                            _data_store->get_vector(id, buffer);
+                        },
+                        current_adaptive_reverse_avg_out_degree(), median_neighbor_distance);
+                    if (!accept_reverse_edge)
+                    {
+                        continue;
+                    }
+                }
+#endif
                 if (des_pool.size() < (uint64_t)(defaults::GRAPH_SLACK_FACTOR * range))
                 {
-                    // des_pool.emplace_back(n);
                     _graph_store->add_neighbour(des, n);
                     prune_needed = false;
                 }
@@ -1567,7 +1666,7 @@ void Index<T, TagT, LabelT>::inter_insert(uint32_t n, std::vector<uint32_t> &pru
                     prune_needed = true;
                 }
             }
-        } // des lock is released by this point
+        }
 
         if (prune_needed)
         {
@@ -1591,7 +1690,6 @@ void Index<T, TagT, LabelT>::inter_insert(uint32_t n, std::vector<uint32_t> &pru
             prune_neighbors(des, dummy_pool, new_out_neighbors, scratch);
             {
                 LockGuard guard(_locks[des]);
-
                 _graph_store->set_neighbours(des, new_out_neighbors);
             }
         }
@@ -1878,6 +1976,23 @@ void Index<T, TagT, LabelT>::build_with_data_populated(const std::vector<TagT> &
         initialize_query_scratch(5 + num_threads_index, index_L, index_L, index_R, maxc,
                                  _data_store->get_aligned_dim());
     }
+
+#if DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE
+    if (_adaptive_reverse_prune_params.enabled)
+    {
+        if (!_force_reordered_start)
+        {
+            throw ANNException(
+                "Adaptive reverse pruning requires reordered input with --force_reordered_start enabled.", -1,
+                __FUNCSIG__, __FILE__, __LINE__);
+        }
+        initialize_adaptive_reverse_pruner();
+    }
+    else
+    {
+        _adaptive_reverse_pruner.reset();
+    }
+#endif
 
     generate_frozen_point();
     link();

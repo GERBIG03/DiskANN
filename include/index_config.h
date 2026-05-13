@@ -1,6 +1,9 @@
 #pragma once
 
 #include "common_includes.h"
+#include "ann_exception.h"
+#include "distance.h"
+#include "logger.h"
 #include "parameters.h"
 
 namespace diskann
@@ -22,6 +25,16 @@ enum class ShortEdgeAugmentationMode
     APPROX
 };
 
+struct AdaptiveReversePruneParams
+{
+    bool enabled = false;
+    bool strict_require_reorder = false;
+    float alpha = 1.0f;
+    float k_mad = 1.0f;
+    float r_min_ratio = 0.5f;
+    uint32_t min_neighbors_to_check = 4;
+};
+
 struct IndexConfig
 {
     DataStoreStrategy data_strategy;
@@ -39,6 +52,7 @@ struct IndexConfig
     bool filtered_index;
     bool force_reordered_start;
     ShortEdgeAugmentationMode short_edge_augmentation_mode;
+    AdaptiveReversePruneParams adaptive_reverse_prune_params;
 
     size_t num_pq_chunks;
     size_t num_frozen_pts;
@@ -61,7 +75,8 @@ struct IndexConfig
                 size_t max_points, size_t num_pq_chunks, size_t num_frozen_points, bool dynamic_index, bool enable_tags,
                 bool pq_dist_build, bool concurrent_consolidate, bool use_opq, bool filtered_index,
                 bool force_reordered_start, ShortEdgeAugmentationMode short_edge_augmentation_mode,
-                size_t short_edge_n_samples, size_t short_edge_max_candidates, size_t short_edge_approx_L,
+                AdaptiveReversePruneParams adaptive_reverse_prune_params, size_t short_edge_n_samples,
+                size_t short_edge_max_candidates, size_t short_edge_approx_L,
                 float short_edge_alpha, std::string &short_edge_exact_path, std::string &data_type,
                 const std::string &tag_type, const std::string &label_type,
                 std::shared_ptr<IndexWriteParameters> index_write_params,
@@ -70,6 +85,7 @@ struct IndexConfig
           max_points(max_points), dynamic_index(dynamic_index), enable_tags(enable_tags), pq_dist_build(pq_dist_build),
           concurrent_consolidate(concurrent_consolidate), use_opq(use_opq), filtered_index(filtered_index),
           force_reordered_start(force_reordered_start), short_edge_augmentation_mode(short_edge_augmentation_mode),
+          adaptive_reverse_prune_params(adaptive_reverse_prune_params),
           num_pq_chunks(num_pq_chunks), num_frozen_pts(num_frozen_points), short_edge_n_samples(short_edge_n_samples),
           short_edge_max_candidates(short_edge_max_candidates), short_edge_approx_L(short_edge_approx_L),
           short_edge_alpha(short_edge_alpha), short_edge_exact_path(short_edge_exact_path), label_type(label_type),
@@ -161,6 +177,48 @@ class IndexConfigBuilder
     IndexConfigBuilder &with_short_edge_augmentation_mode(ShortEdgeAugmentationMode mode)
     {
         this->_short_edge_augmentation_mode = mode;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_adaptive_reverse_prune_params(const AdaptiveReversePruneParams &params)
+    {
+        this->_adaptive_reverse_prune_params = params;
+        return *this;
+    }
+
+    IndexConfigBuilder &enable_adaptive_reverse_prune(bool enabled)
+    {
+        this->_adaptive_reverse_prune_params.enabled = enabled;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_adaptive_reverse_prune_strict_require_reorder(bool strict_require_reorder)
+    {
+        this->_adaptive_reverse_prune_params.strict_require_reorder = strict_require_reorder;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_adaptive_reverse_prune_alpha(float alpha)
+    {
+        this->_adaptive_reverse_prune_params.alpha = alpha;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_adaptive_reverse_prune_k_mad(float k_mad)
+    {
+        this->_adaptive_reverse_prune_params.k_mad = k_mad;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_adaptive_reverse_prune_r_min_ratio(float r_min_ratio)
+    {
+        this->_adaptive_reverse_prune_params.r_min_ratio = r_min_ratio;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_adaptive_reverse_prune_min_neighbors_to_check(uint32_t min_neighbors_to_check)
+    {
+        this->_adaptive_reverse_prune_params.min_neighbors_to_check = min_neighbors_to_check;
         return *this;
     }
 
@@ -284,9 +342,9 @@ class IndexConfigBuilder
         return IndexConfig(_data_strategy, _graph_strategy, _metric, _dimension, _max_points, _num_pq_chunks,
                            _num_frozen_pts, _dynamic_index, _enable_tags, _pq_dist_build, _concurrent_consolidate,
                            _use_opq, _filtered_index, _force_reordered_start, _short_edge_augmentation_mode,
-                           _short_edge_n_samples, _short_edge_max_candidates, _short_edge_approx_L,
-                           _short_edge_alpha, _short_edge_exact_path, _data_type, _tag_type, _label_type,
-                           _index_write_params, _index_search_params);
+                           _adaptive_reverse_prune_params, _short_edge_n_samples, _short_edge_max_candidates,
+                           _short_edge_approx_L, _short_edge_alpha, _short_edge_exact_path, _data_type, _tag_type,
+                           _label_type, _index_write_params, _index_search_params);
     }
 
     IndexConfigBuilder(const IndexConfigBuilder &) = delete;
@@ -308,6 +366,7 @@ class IndexConfigBuilder
     bool _filtered_index{defaults::HAS_LABELS};
     bool _force_reordered_start = false;
     ShortEdgeAugmentationMode _short_edge_augmentation_mode = ShortEdgeAugmentationMode::NONE;
+    AdaptiveReversePruneParams _adaptive_reverse_prune_params;
 
     size_t _num_pq_chunks = 0;
     size_t _num_frozen_pts{defaults::NUM_FROZEN_POINTS_STATIC};
