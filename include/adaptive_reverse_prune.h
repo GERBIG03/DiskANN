@@ -65,6 +65,9 @@ template <typename T> class AdaptiveReversePruner
             return true;
         }
 
+        const float candidate_distance = compute_distance(anchor_vec, candidate_vec);
+        const float candidate_len_grade = candidate_distance / median_neighbor_distance;
+        const float candidate_cosine = compute_direction_cosine(anchor_vec, candidate_vec);
         const float candidate_score = compute_score(anchor_vec, candidate_vec, median_neighbor_distance);
         const float max_existing_score = *std::max_element(scores.begin(), scores.end());
         const float median_score = compute_median(scores);
@@ -79,7 +82,9 @@ template <typename T> class AdaptiveReversePruner
         }
 
         const float cutoff = median_score + _params.k_mad * mad;
-        return !(candidate_score > cutoff && candidate_score > max_existing_score);
+        const bool strong_reverse = candidate_cosine < 0.0f;
+        const bool clearly_long = candidate_len_grade > 1.5f;
+        return !(strong_reverse && clearly_long && candidate_score > cutoff && candidate_score > max_existing_score);
 #else
         (void)candidate_vec;
         (void)anchor_vec;
@@ -101,6 +106,11 @@ template <typename T> class AdaptiveReversePruner
 
     float compute_reverse_grade(const T *anchor_vec, const T *target_vec) const
     {
+        return (1.0f - compute_direction_cosine(anchor_vec, target_vec)) * 0.5f;
+    }
+
+    float compute_direction_cosine(const T *anchor_vec, const T *target_vec) const
+    {
         float dot = 0.0f;
         float norm_to_centroid = 0.0f;
         float norm_to_target = 0.0f;
@@ -114,10 +124,9 @@ template <typename T> class AdaptiveReversePruner
         }
         if (norm_to_centroid == 0.0f || norm_to_target == 0.0f)
         {
-            return 0.5f;
+            return 0.0f;
         }
-        const float cosine = dot / (std::sqrt(norm_to_centroid) * std::sqrt(norm_to_target));
-        return (1.0f - cosine) * 0.5f;
+        return dot / (std::sqrt(norm_to_centroid) * std::sqrt(norm_to_target));
     }
 
     float compute_distance(const T *lhs, const T *rhs) const
