@@ -1980,6 +1980,12 @@ void Index<T, TagT, LabelT>::build_with_data_populated(const std::vector<TagT> &
 #if DISKANN_ENABLE_ADAPTIVE_REVERSE_PRUNE
     if (_adaptive_reverse_prune_params.enabled)
     {
+        if (!_force_reordered_start && _adaptive_reverse_prune_params.strict_require_reorder)
+        {
+            throw ANNException(
+                "Adaptive reverse pruning requires reordered input with --force_reordered_start enabled.", -1,
+                __FUNCSIG__, __FILE__, __LINE__);
+        }
         if (!_force_reordered_start)
         {
             throw ANNException(

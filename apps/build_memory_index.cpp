@@ -179,6 +179,10 @@ int main(int argc, char **argv)
 
         diskann::cout << "Starting index build with R: " << R << "  Lbuild: " << L << "  alpha: " << alpha
                       << "  #threads: " << num_threads << std::endl;
+        diskann::cout << "Effective config: force_reordered_start=" << (force_reordered_start ? "true" : "false")
+                      << " short_edge_mode=" << short_edge_mode
+                      << " adaptive_reverse_prune="
+                      << (enable_adaptive_reverse_prune ? "true" : "false") << std::endl;
 
         size_t data_num, data_dim;
         diskann::get_bin_metadata(data_path, data_num, data_dim);
